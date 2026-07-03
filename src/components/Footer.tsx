@@ -5,6 +5,7 @@
 
 import React, { useState } from 'react';
 import { GraduationCap, Award, ShieldCheck, Heart, Database, RefreshCw, AlertTriangle, CheckCircle2, XCircle, X } from 'lucide-react';
+import logoImg from '../assets/logo.png';
 
 interface FooterProps {
   currentView?: 'public' | 'dashboard';
@@ -122,14 +123,14 @@ export default function Footer({ currentView }: FooterProps) {
         <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-8">
           <div>
             <div className="flex items-center space-x-2.5 text-white mb-3">
-              <div className="bg-indigo-600 p-1.5 rounded-lg text-white">
-                <GraduationCap className="h-5 w-5" />
-              </div>
-              <span className="font-sans font-bold text-lg tracking-tight">
-                AkridaKampus
-              </span>
+              <img 
+                src={logoImg} 
+                alt="Universitas Islam Bogor Logo" 
+                className="h-11 w-auto object-contain brightness-100"
+                referrerPolicy="no-referrer"
+              />
             </div>
-            <p className="text-sm text-slate-400 leading-relaxed max-w-sm">
+            <p className="text-sm text-slate-400 leading-relaxed max-w-sm mt-3">
               Sistem Penjaminan Mutu Internal dan Publikasi Real-Time Akreditasi Program Studi demi keunggulan mutu berkelanjutan.
             </p>
           </div>
@@ -154,14 +155,14 @@ export default function Footer({ currentView }: FooterProps) {
               Gedung Rektorat Utama, Lantai 2, Kampus Terpadu
             </p>
             <p className="text-sm text-slate-300">
-              Email: <span className="text-indigo-400">lpm@kampus.ac.id</span>
+              Email: <span className="text-indigo-400">lpm@uib.ac.id</span>
             </p>
           </div>
         </div>
 
         <div className="pt-6 border-t border-slate-800 flex flex-col sm:flex-row justify-between items-center text-xs">
           <div className="flex items-center space-x-4 flex-wrap gap-y-2">
-            <p>© {currentYear} AkridaKampus. Hak Cipta Dilindungi.</p>
+            <p>© {currentYear} Universitas Islam Bogor. Hak Cipta Dilindungi.</p>
             {currentView === 'dashboard' && (
               <button
                 onClick={runConnectionCheck}

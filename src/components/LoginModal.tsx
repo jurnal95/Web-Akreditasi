@@ -6,6 +6,7 @@
 import React, { useState } from 'react';
 import { X, Lock, User, GraduationCap, ArrowRight, ShieldCheck, Key } from 'lucide-react';
 import { UserSession } from '../types';
+import logoImg from '../assets/logo.png';
 
 interface LoginModalProps {
   isOpen: boolean;
@@ -179,12 +180,14 @@ export default function LoginModal({ isOpen, onClose, onLoginSuccess }: LoginMod
           <div className="p-4.5 space-y-4 overflow-y-auto flex-1 scrollbar-thin">
             
             {/* Logo/Identity */}
-            <div className="text-center">
-              <div className="inline-flex bg-indigo-50 p-2.5 rounded-full text-indigo-600 mb-1.5">
-                <GraduationCap className="h-6 w-6" />
-              </div>
-              <h2 className="text-base font-extrabold text-slate-800 leading-none">AkridaKampus</h2>
-              <p className="text-xs text-slate-400 mt-1">Lembaga Penjaminan Mutu &amp; Akreditasi Kampus</p>
+            <div className="text-center flex flex-col items-center justify-center">
+              <img 
+                src={logoImg} 
+                alt="Universitas Islam Bogor Logo" 
+                className="h-14 w-auto object-contain mb-1.5"
+                referrerPolicy="no-referrer"
+              />
+              <p className="text-xs text-slate-400">Lembaga Penjaminan Mutu &amp; Akreditasi Kampus</p>
             </div>
 
             {errorMsg && (

@@ -10,7 +10,7 @@ import HomepagePublic from './components/HomepagePublic';
 import DashboardSuperAdmin from './components/DashboardSuperAdmin';
 import DashboardAdminProdi from './components/DashboardAdminProdi';
 import LoginModal from './components/LoginModal';
-import { StudyProgram, UserSession } from './types';
+import { StudyProgram, UserSession, DocStatus, DocChecklist } from './types';
 import { getStudyPrograms, saveStudyPrograms, INITIAL_STUDY_PROGRAMS } from './data';
 import { ShieldAlert, BookOpen } from 'lucide-react';
 
@@ -73,11 +73,37 @@ export default function App() {
                   vision: '',
                   mission: []
                 },
-                documents: existing?.documents || {
-                  led: { status: 'Belum Ada', lastUpdated: '-', fileName: '' },
-                  lkps: { status: 'Belum Ada', lastUpdated: '-', fileName: '' },
-                  legalitas: { status: 'Belum Ada', lastUpdated: '-', fileName: '' }
-                },
+                documents: (() => {
+                  const defaultDocs: DocChecklist = {
+                    led: { status: 'Belum Ada', lastUpdated: '-', fileName: '' },
+                    lkps: { status: 'Belum Ada', lastUpdated: '-', fileName: '' },
+                    legalitas: { status: 'Belum Ada', lastUpdated: '-', fileName: '' }
+                  };
+                  
+                  if (existing?.documents) {
+                    defaultDocs.led = { ...existing.documents.led };
+                    defaultDocs.lkps = { ...existing.documents.lkps };
+                    defaultDocs.legalitas = { ...existing.documents.legalitas };
+                  }
+
+                  if (Array.isArray(p.berkas)) {
+                    p.berkas.forEach((b: any) => {
+                      const jenis = String(b.jenis_dokumen).toLowerCase();
+                      const statusMapped = (b.status_berkas || 'Belum Ada') as DocStatus;
+                      const fileNm = b.nama_file || '';
+                      const updated = b.updated_at ? b.updated_at.split('T')[0] : '-';
+                      
+                      if (jenis === 'led') {
+                        defaultDocs.led = { status: statusMapped, lastUpdated: updated, fileName: fileNm };
+                      } else if (jenis === 'lkps') {
+                        defaultDocs.lkps = { status: statusMapped, lastUpdated: updated, fileName: fileNm };
+                      } else if (jenis === 'izin' || jenis === 'legalitas') {
+                        defaultDocs.legalitas = { status: statusMapped, lastUpdated: updated, fileName: fileNm };
+                      }
+                    });
+                  }
+                  return defaultDocs;
+                })(),
                 criteriaProgress: existing?.criteriaProgress || {
                   k1: 'Belum Mulai',
                   k2: 'Belum Mulai',

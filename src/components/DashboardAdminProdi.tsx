@@ -168,6 +168,9 @@ export default function DashboardAdminProdi({ program, onUpdateProgram }: Dashbo
         data = await res.json();
       } else {
         const text = await res.text();
+        if (text.includes("Cookie check") || text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html")) {
+          throw new Error("Pengecekan Cookie Iframe Terdeteksi (Cookie Check). Karena batasan keamanan/cookie pihak ketiga browser pada iframe di AI Studio, mohon klik ikon 'Open in New Tab' (Buka di Tab Baru) di pojok kanan atas pratinjau untuk menjalankan aplikasi secara penuh tanpa hambatan iframe.");
+        }
         const cleanText = text.replace(/<[^>]*>/g, '').slice(0, 150).trim();
         throw new Error(cleanText || `Error server dengan status ${res.status}`);
       }
@@ -331,6 +334,7 @@ export default function DashboardAdminProdi({ program, onUpdateProgram }: Dashbo
   const handleDocChange = (docType: 'led' | 'lkps' | 'legalitas', status: DocStatus, fileName?: string) => {
     // Current date stamp
     const today = new Date().toISOString().split('T')[0];
+    const fileNm = fileName !== undefined ? fileName : (program.documents[docType].fileName || `berkas_${docType}_draft.pdf`);
     
     const updatedDocs = {
       ...program.documents,
@@ -338,7 +342,7 @@ export default function DashboardAdminProdi({ program, onUpdateProgram }: Dashbo
         ...program.documents[docType],
         status,
         lastUpdated: today,
-        fileName: fileName !== undefined ? fileName : (program.documents[docType].fileName || `berkas_${docType}_draft.pdf`)
+        fileName: fileNm
       }
     };
 
@@ -348,6 +352,24 @@ export default function DashboardAdminProdi({ program, onUpdateProgram }: Dashbo
     };
 
     onUpdateProgram(updatedProgram);
+
+    // Persist changes to berkas_akreditasi in the background
+    const jenisDokumen = docType === 'legalitas' ? 'IZIN' : docType.toUpperCase();
+    fetch('/api/prodi/berkas-akreditasi', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prodi_id: program.id,
+        jenis_dokumen: jenisDokumen,
+        status_berkas: status,
+        nama_file: fileNm,
+        file_url: null,
+        konten_markdown: null // This is a manual change, no markdown text is generated
+      })
+    }).catch(err => {
+      console.error("Gagal melakukan sinkronisasi manual berkas_akreditasi:", err);
+    });
+
     triggerSuccessToast(`Status berkas ${docType.toUpperCase()} berhasil dimutakhirkan!`);
   };
 
@@ -436,14 +458,43 @@ export default function DashboardAdminProdi({ program, onUpdateProgram }: Dashbo
         body: formData,
       });
 
-      if (!response.ok) {
-        const errData = await response.json();
-        throw new Error(errData.error || 'Terjadi kesalahan saat generate dokumen.');
+      let data: any = {};
+      const contentType = response.headers.get('content-type');
+      if (contentType && contentType.includes('application/json')) {
+        data = await response.json();
+      } else {
+        const text = await response.text();
+        if (text.includes("Cookie check") || text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html")) {
+          throw new Error("Pengecekan Cookie Iframe Terdeteksi (Cookie Check) saat menghubungi AI. Karena batasan keamanan/cookie pihak ketiga browser pada iframe di AI Studio, mohon klik ikon 'Open in New Tab' (Buka di Tab Baru) di pojok kanan atas pratinjau untuk menjalankan aplikasi secara penuh tanpa hambatan iframe.");
+        }
+        const cleanText = text.replace(/<[^>]*>/g, '').slice(0, 150).trim();
+        throw new Error(cleanText || `Error server dengan status ${response.status}`);
       }
 
-      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Terjadi kesalahan saat generate dokumen.');
+      }
       setGeneratedText(data.text);
       setGeneratedFileName(data.fileName);
+      
+      // Immediately reflect the generated document in the checklist menu as 'Draf'
+      const docKey = selectedDocType as 'led' | 'lkps' | 'legalitas';
+      if (selectedDocType !== 'kriteria_mutu') {
+        const today = new Date().toISOString().split('T')[0];
+        const updatedDocs = {
+          ...program.documents,
+          [docKey]: {
+            status: 'Draf' as DocStatus,
+            lastUpdated: today,
+            fileName: data.fileName
+          }
+        };
+        onUpdateProgram({
+          ...program,
+          documents: updatedDocs
+        });
+      }
+
       triggerSuccessToast('Dokumen akreditasi berhasil digenerate dengan AI & tersimpan di database!');
     } catch (err: any) {
       console.error(err);
@@ -472,216 +523,437 @@ export default function DashboardAdminProdi({ program, onUpdateProgram }: Dashbo
         // INTERACTIVE PRE-GENERATION QUESTIONNAIRE TEMPLATES
         if (selectedDocType === 'kriteria_mutu') {
           const critName = lamInfo.criteriaNames[selectedCriteriaKey] || "Kriteria Mutu";
-          offlineText = `# 📋 PANDUAN PENGUMPULAN DATA & WAWANCARA KRITERIA MUTU
-## KRITERIA: ${selectedCriteriaKey.toUpperCase()} - ${critName}
-## Program Studi: ${program.name} (${program.level}) - ${program.lam}
+          offlineText = `# 📋 PANDUAN LENGKAP PENGUMPULAN DATA & INSTRUMEN WAWANCARA TERARAH
+## KATEGORI EVALUASI: KRITERIA ${selectedCriteriaKey.toUpperCase()} - ${critName}
+## Program Studi: ${program.name} (${program.level}) - Lembaga Akreditasi: ${program.lam}
 
-${referenceSection}### I. Deskripsi Kebutuhan Data & Dokumen Bukti (Evidence)
-Sebelum menulis narasi evaluasi diri untuk Kriteria ${selectedCriteriaKey.toUpperCase()}, Tim Penyusun wajib mengumpulkan dokumen berikut:
-1. **Rencana Strategis (Renstra)** & Rencana Operasional (Renop) Fakultas/UPPS.
-2. **Dokumen Kebijakan Standar Mutu** khusus untuk kriteria ini yang disahkan Senat.
-3. **Laporan Audit Mutu Internal (AMI)** beserta bukti rapat tinjauan manajemen (RTM) selama 3 tahun terakhir.
-4. **Survei Kepuasan Pemangku Kepentingan** (mahasiswa/dosen/alumni/mitra) terkait kriteria ini.
+${referenceSection}### I. KRITERIA PENILAIAN & EVIDENCE CHECKLIST (DOKUMEN BUKTI)
+Sebelum tim menyusun naskah narasi evaluasi untuk Kriteria ${selectedCriteriaKey.toUpperCase()}, Anda wajib melengkapi dan memverifikasi ketersediaan bukti fisik/digital berikut:
 
-### II. Daftar Pertanyaan Wawancara Terarah (Wajib Dijawab)
-Silakan diskusikan dan jawab pertanyaan berikut sebelum menyusun narasi draf:
-1. **Bagaimana kepemimpinan dan pengelolaan** yang berjalan pada kriteria ini di tingkat prodi ${program.name}? Apakah sudah transparan dan akuntabel?
-2. **Apa saja standar mutu internal** yang ditetapkan prodi? Apakah indikator kinerjanya melampaui Standar Nasional Pendidikan Tinggi (SN-Dikti)?
-3. **Bagaimana siklus PPEPP** (Penetapan, Pelaksanaan, Evaluasi, Pengendalian, Peningkatan) diterapkan khusus pada kriteria ini? Berikan contoh riil kasusnya.
-4. **Apa kendala utama** yang menghambat pencapaian target mutu kriteria ini dalam 2 tahun terakhir?
-5. **Upaya strategis apa** yang sudah disiapkan untuk meningkatkan skor kriteria ini ke depan?
+1. **Rencana Strategis (Renstra) & Rencana Operasional (Renop) UPPS:** Dokumen formal jangka panjang dan jangka menengah yang menjabarkan milestones program studi secara spesifik.
+2. **Dokumen Kebijakan Standar Mutu Internal:** Surat Keputusan Rektor/Dekan tentang penetapan standar kualitas pengajaran, riset, dan pengabdian masyarakat (PKM) yang melampaui Standar Nasional Pendidikan Tinggi (SN-Dikti).
+3. **Laporan Siklus PPEPP Lengkap:** Rekam jejak audit internal (AMI), tindak lanjut perbaikan, laporan evaluasi berkala, dan dokumen umpan balik dari eksternal/pengguna lulusan.
+4. **Instrumen Kepuasan Pemangku Kepentingan:** Hasil survei kepuasan mahasiswa, dosen, alumni, dan pengguna jasa (mitra) lengkap dengan statistik deskriptif dan grafik analisis tindak lanjut.
+5. **Portofolio Mata Kuliah & Silabus:** RPS (Rencana Pembelajaran Semester) berbasis Outcome-Based Education (OBE) untuk seluruh mata kuliah aktif.
 
-### III. Lembar Isian Ringkas (Template Data Mentah)
-| Nama Indikator Kinerja | Angka Target | Angka Riil Saat Ini | Status Pencapaian |
-|---|---|---|---|
-| Skor Kepuasan Pengguna | >= 3.50 (Skala 4) | 3.65 (Sangat Baik) | Melampaui Target |
-| Keterlibatan Dosen Tetap | 100% Aktif | 92% Aktif | Tercapai Sebagian |
-| Audit Mutu Internal (AMI) | 1 Kali / Tahun | Terlaksana | Tercapai |
+---
 
-> *Petunjuk: Anda dapat menyalin lembar isian di atas, mengisinya, lalu menempelkannya ke kotak 'Referensi Data' untuk melakukan generate ulang draf draf dokumen final.*`;
+### II. DAFTAR PERTANYAAN WAWANCARA TERARAH (STAKEHOLDER ELICITATION)
+Gunakan daftar pertanyaan kritis berikut dalam forum diskusi kelompok terarah (FGD) internal guna mengekstrak data kualitatif berbobot:
+
+#### A. Wawancara Pengelola Program Studi (Kaprodi & Unit UPPS)
+- **Pertanyaan 1:** Bagaimana kepemimpinan dan tata kelola program studi ini memastikan akuntabilitas, transparansi, dan kredibilitas operasional harian? Apa mitigasi risiko utama jika terjadi ketidakstabilan manajerial?
+- **Pertanyaan 2:** Apa pilar utama keunikan (penciri) kurikulum prodi ${program.name} dibandingkan institusi pesaing tingkat nasional dan bagaimana pilar tersebut direfleksikan dalam luaran mata kuliah?
+- **Pertanyaan 3:** Jelaskan efektivitas sistem penjaminan mutu internal (SPMI) dalam memonitor tingkat kehadiran dosen, ketepatan waktu pengumpulan nilai, dan penyelesaian kendala mahasiswa.
+
+#### B. Wawancara Dosen Tetap & Tenaga Kependidikan
+- **Pertanyaan 4:** Bagaimana mekanisme pembagian dana hibah penelitian internal fakultas dan sejauh mana luaran riset Anda telah diintegrasikan kembali ke dalam modul ajar praktis bagi mahasiswa?
+- **Pertanyaan 5:** Sejauh mana ketersediaan fasilitas pengembangan profesional (studi lanjut S3, sertifikasi kompetensi industri, partisipasi konferensi internasional) didukung penuh oleh anggaran UPPS?
+
+#### C. Wawancara Mahasiswa, Alumni, & Mitra Kerja
+- **Pertanyaan 6:** Apakah sarana prasarana penunjang (laboratorium komputer, perpustakaan hibrida, akses jurnal ilmiah internasional) memadai untuk mendukung perkuliahan berstandar global?
+- **Pertanyaan 7:** Berapa rata-rata masa tunggu lulusan prodi ini untuk memperoleh pekerjaan pertama yang relevan dengan bidang keahliannya, dan apa keunggulan kompetitif alumni kita menurut persepsi mitra kerja?
+
+---
+
+### III. LEMBAR ISIAN RINGKAS (MATRIKS DATA PENDUKUNG KUANTITATIF)
+Silakan salin, lengkapi, dan masukkan tabel isian berikut ke kolom **"Referensi Data"** pada panel kiri untuk menghasilkan narasi draf akreditasi otomatis yang presisi tinggi:
+
+| Kode Indikator Mutu | Deskripsi Indikator | Angka Target | Capaian Riil Saat Ini | Status Kinerja (PPEPP) |
+|---|---|---|---|---|
+| IND-4.1 | Persentase Dosen Tetap berkualifikasi S3 (Doktor) | S1: >= 35% | 42.50% | Melampaui Target (Peningkatan) |
+| IND-4.2 | Rasio jumlah Dosen Tetap terhadap Mahasiswa Aktif | 1 : 25 | 1 : 22.4 | Sangat Optimal (Pertahankan) |
+| IND-5.1 | Anggaran Penelitian per Dosen per Tahun (Rupiah) | >= Rp 15jt | Rp 18.250.000,- | Tercapai (Pertahankan) |
+| IND-6.3 | Tingkat Kepuasan Pengguna Lulusan (Skala 1-4) | >= 3.25 | 3.58 | Melampaui Target (Peningkatan) |
+| IND-7.2 | Publikasi Internasional Terindeks Scopus per Tahun | >= 5 paper | 8 paper | Melampaui Target (Tingkatkan) |
+
+---
+
+### IV. REKOMENDASI FORMULASI DRAF AKREDITASI
+1. **Gunakan Bukti Empiris:** Setiap pernyataan keunggulan dalam narasi wajib disertai dengan nomor SK, judul dokumen pendukung, atau angka persentase konkret.
+2. **Hindari Narasi Normatif:** Gantilah frasa seperti *\"Pembelajaran berjalan sangat baik\"* menjadi *\"Efektivitas pembelajaran dibuktikan dengan rata-rata IPK lulusan 3.62 dan indeks kepuasan mahasiswa sebesar 94.5% berdasarkan survei EDOM semester ganjil 2025/2026.\"*`;
         } else if (selectedDocType === 'led') {
           offlineText = `# 📋 PANDUAN INTERAKTIF PENGUMPULAN DATA & WAWANCARA LAPORAN EVALUASI DIRI (LED)
-## Dokumen: Laporan Evaluasi Diri (LED) Komprehensif
-## Program Studi: ${program.name} (${program.level}) - ${program.lam}
+## DOKUMEN: LAPORAN EVALUASI DIRI (LED) SEMILIR - 9 KRITERIA BAN-PT & LAM
+## Program Studi: ${program.name} (${program.level}) - Lembaga Akreditasi: ${program.lam}
 
-${referenceSection}### I. Kebutuhan Data Pokok LED (Lembaga Akreditasi ${program.lam})
-Untuk menyusun draf LED yang berbobot unggul, persiapkan data makro berikut:
-1. **Sejarah Ringkat & Legalitas Pendirian:** SK Izin Operasional Prodi, SK Akreditasi terakhir, serta SK Pejabat struktural UPPS.
-2. **Data Tata Kelola (UPPS):** Struktur organisasi, manual mutu, kode etik dosen/mahasiswa, serta rencana mitigasi risiko operasional.
-3. **Analisis SWOT Komparatif:** Rekap data keunggulan unik (selling points) prodi dibandingkan kompetitor utama.
+${referenceSection}### I. STRUKTUR UTAMA LED & DATA PENDUKUNG MAKRO
+Penyusunan naskah komprehensif Laporan Evaluasi Diri (LED) membutuhkan penyelarasan data kuantitatif dari LKPS dan dokumen kualitatif strategis. Berikut adalah rincian data per Bab yang harus Anda siapkan:
 
-### II. Pertanyaan Wawancara Strategis (Pimpinan Fakultas & Prodi)
-Jawablah pertanyaan-pertanyaan pemantik berikut untuk memperkaya narasi evaluasi diri:
-1. **Visi Keilmuan:** Apa keunikan kompetensi lulusan ${program.name} di prodi ini yang tidak dimiliki universitas lain?
-2. **Sinergi UPPS & Prodi:** Sejauh mana Fakultas (UPPS) memberikan dukungan finansial dan fasilitas untuk pengembangan riset dan pengabdian masyarakat di tingkat prodi?
-3. **Keberlanjutan (Sustainability):** Bagaimana strategi prodi dalam menjaga keberlanjutan animo mahasiswa baru dan kemandirian dana operasional?
-4. **Penjaminan Mutu:** Apakah sistem SPMI di prodi ini sudah memiliki auditor internal bersertifikasi? Bagaimana tindak lanjut audit dilakukan?
+#### BAB I: PENDAHULUAN
+1. **Analisis Kondisi Eksternal:** Profil lingkungan makro (demografi, ekonomi, teknologi, regulasi) dan mikro (kompetitor lokal, permintaan industri) yang mempengaruhi prospek program studi.
+2. **Profil Unit Pengelola Program Studi (UPPS):** Landasan pendirian, sejarah singkat, tujuan strategis fakultas, tata pamong, dan struktur organisasi.
+3. **Sistem Penjaminan Mutu Internal (SPMI):** Keberadaan organ penjaminan mutu, dokumen kebijakan mutu, manual mutu, standar mutu, formulir mutu, dan laporan audit mutu internal (AMI).
 
-### III. Checklist Kelengkapan Dokumen Evidence LED
-- [ ] Dokumen Rencana Strategis (Renstra) UPPS yang masih berlaku.
-- [ ] Laporan evaluasi pencapaian Visi Misi Tujuan Strategis (VMTS).
-- [ ] Dokumen Rencana Induk Penelitian (RIP) prodi.
-- [ ] SOP-SOP Akademik dan Non-Akademik lengkap.
+#### BAB II: HASIL EVALUASI DIRI (9 KRITERIA UTAMA)
+- **Kriteria 1 (Visi, Misi, Tujuan, dan Strategi):** Mekanisme penyusunan, sosialisasi, dan evaluasi ketercapaian VMTS.
+- **Kriteria 2 (Tata Pamong, Tata Kelola, dan Kerja Sama):** Struktur kredibel, transparan, akuntabel, bertanggung jawab, adil, sistem penjaminan mutu, dan kerja sama pendidikan/riset/PKM.
+- **Kriteria 3 (Mahasiswa):** Sistem rekrutmen, rasio keketatan pendaftar, layanan mahasiswa, prestasi akademik/non-akademik, dan pelacakan alumni (tracer study).
+- **Kriteria 4 (Sumber Daya Manusia):** Kualifikasi dosen tetap, kecukupan dosen, beban kerja dosen (BKD), peningkatan kompetensi, tenaga kependidikan (pustakawan, laboran, admin).
+- **Kriteria 5 (Keuangan, Sarana, dan Prasarana):** Anggaran operasional, kecukupan ruang kelas, kecukupan laboratorium, sarana teknologi informasi, jurnal hibrida, dan keberlanjutan pendanaan.
+- **Kriteria 6 (Pendidikan):** Kurikulum berbasis KKNI/OBE, integrasi hasil riset ke pengajaran, interaksi dosen-mahasiswa, metode evaluasi capaian pembelajaran.
+- **Kriteria 7 (Penelitian):** Produktivitas riset dosen tetap, keterlibatan mahasiswa dalam penelitian dosen, dana hibah eksternal/internal.
+- **Kriteria 8 (Pengabdian kepada Masyarakat):** Pengabdian masyarakat berbasis keilmuan prodi, keterlibatan aktif mahasiswa, kebermanfaatan nyata bagi masyarakat.
+- **Kriteria 9 (Luaran dan Capaian Tridharma):** Publikasi ilmiah, HAKI/Paten, waktu tunggu kerja lulusan, kesesuaian bidang kerja lulusan, prestasi kompetisi mahasiswa tingkat nasional/internasional.
 
-> *Saran: Kumpulkan poin-poin jawaban di atas, tempelkan pada input 'Referensi Data' di halaman ini, lalu klik 'Generate' untuk mengonversi jawaban mentah Anda menjadi bab draf LED formal.*`;
+#### BAB III: ANALISIS DAN STRATEGI PENGEMBANGAN
+1. **Analisis SWOT Terintegrasi:** Sintesis kelemahan, kekuatan, peluang, dan ancaman dari 9 Kriteria.
+2. **Strategi Pemecahan Masalah:** Program konkret jangka pendek dan menengah untuk memperbaiki kelemahan operasional prodi.
+3. **Analisis Keberlanjutan (Sustainability):** Strategi pemasaran, kelayakan finansial, dan stabilitas sumber daya manusia.
+
+---
+
+### II. DAFTAR PERTANYAAN STRATEGIS UNTUK FGD PIMPINAN & TIM PENYUSUN
+- **Pertanyaan 1 (Sinergi UPPS-Prodi):** Bagaimana alokasi sumber daya finansial dari Unit Pengelola (Fakultas) didistribusikan untuk mendukung tercapainya Indikator Kinerja Utama (IKU) Program Studi ${program.name}?
+- **Pertanyaan 2 (Visi Keilmuan):** Bagaimana Visi Keilmuan program studi dirumuskan, dan bagaimana Visi tersebut secara konkret mempengaruhi penyusunan kurikulum operasional?
+- **Pertanyaan 3 (Peningkatan Kompetensi SDM):** Apa kebijakan penghargaan (reward) dan sanksi (punishment) yang dijalankan untuk menstimulasi dosen tetap agar mempublikasikan karya ilmiah mereka pada jurnal bereputasi global (Scopus/Sinta 1-2)?
+- **Pertanyaan 4 (Penjaminan Mutu):** Bagaimana temuan-temuan dari Audit Mutu Internal (AMI) ditindaklanjuti dalam Rapat Tinjauan Manajemen (RTM) bersama Dekanat untuk peningkatan mutu berkelanjutan (PPEPP)?
+
+---
+
+### III. CHECKLIST KELENGKAPAN DOKUMEN EVIDENCE (EVIDEN DIGITAL)
+- [ ] Dokumen Rencana Strategis (Renstra) UPPS & Rencana Operasional (Renop) Fakultas yang sah.
+- [ ] Surat Keputusan Rektor/Dekan tentang Pembentukan Tim SPMI/Gugus Penjaminan Mutu (GPM).
+- [ ] Laporan Audit Mutu Internal (AMI) 3 Tahun Terakhir lengkap dengan Berita Acara RTM.
+- [ ] Dokumen Kurikulum (Kurikulum OBE) lengkap dengan Peta Jalan Capaian Pembelajaran Lulusan (CPL).
+- [ ] Nota Kesepahaman (MoU) dan Perjanjian Kerja Sama (MoA) aktif dengan mitra industri/akademis luar negeri.
+- [ ] Laporan Tracer Study terbaru dengan statistik deskriptif dan tingkat respons (response rate) minimal 60%.`;
         } else if (selectedDocType === 'lkps') {
-          offlineText = `# 📋 PANDUAN INTERAKTIF WAWANCARA & PRE-GEN DATA LKPS
-## Dokumen: Laporan Kinerja Program Studi (LKPS) - Data Tabel
-## Program Studi: ${program.name} (${program.level}) - ${program.lam}
+          offlineText = `# 📋 PANDUAN TEKNIS WAWANCARA & INSTRUMEN PRE-GENERATION DATA LKPS
+## DOKUMEN: LAPORAN KINERJA PROGRAM STUDI (LKPS) - DATA TABEL MANDATORI
+## Program Studi: ${program.name} (${program.level}) - Lembaga Akreditasi: ${program.lam}
 
-${referenceSection}### I. Daftar Tabel Kritis yang Memerlukan Pengisian Data
-Sesuai instrumen ${program.lam}, Anda harus mengumpulkan data angka riil untuk tabel berikut:
-1. **Tabel Profil Dosen Tetap:** NIDN/NIDK, kualifikasi S2/S3, jabatan akademik, kesesuaian bidang keahlian, dan sertifikasi pendidik.
-2. **Tabel Seleksi & Daya Tampung Mahasiswa:** Jumlah pendaftar, jumlah yang lulus seleksi, jumlah mahasiswa baru (reguler/transfer), dan jumlah mahasiswa aktif.
-3. **Tabel Kurikulum, SKS, dan RPS:** Peta mata kuliah tiap semester, bobot SKS (teori/praktikum), mata kuliah penciri prodi, dan ketersediaan RPS terbaru.
-4. **Tabel Produktivitas Ilmiah:** Jumlah publikasi dosen di jurnal nasional terakreditasi (Sinta 1-6) dan jurnal internasional bereputasi (Scopus/SJR) selama 3 tahun terakhir.
+${referenceSection}### I. STRUKTUR TABEL KUANTITATIF MANDATORI LKPS (STANDAR AKREDITASI)
+Untuk menghasilkan draf LKPS yang presisi tinggi dan terisi penuh, Tim Penyusun wajib mengumpulkan data sekunder dari pangkalan data pendidikan tinggi (PDDIKTI) dan unit sistem informasi akademik (SIAKAD) universitas. Berikut adalah tabel kuantitatif kritis yang harus dipersiapkan:
 
-### II. Pertanyaan Wawancara Validasi Data (Tim PDDIKTI & Akademik)
-Verifikasi hal-hal berikut untuk menghindari kesalahan audit data:
-1. **Kecocokan PDDIKTI:** Apakah seluruh dosen tetap prodi ${program.name} telah terdaftar dengan homebase yang benar di sistem PDDIKTI?
-2. **Rasio Dosen-Mahasiswa:** Berapa rasio rill dosen terhadap mahasiswa aktif saat ini? Apakah sudah memenuhi batas aman minimum?
-3. **Masa Studi Lulusan:** Berapa rata-rata masa studi lulusan dalam 3 tahun terakhir? Berapa persentase kelulusan tepat waktu (KTW)?
-4. **Kesesuaian Kompetensi Dosen:** Apakah ada dosen yang mengajar mata kuliah di luar bidang keahlian utamanya? Bagaimana solusinya?
+1. **Tabel 1 (Profil Kualifikasi Dosen Tetap):** NIDN/NIDK, tingkat pendidikan formal tertinggi (S2/S3), asal perguruan tinggi lulusan, jabatan fungsional akademik (Asisten Ahli, Lektor, Lektor Kepala, Guru Besar), sertifikasi pendidik profesional, kesesuaian bidang keahlian terhadap mata kuliah yang diampu, serta beban SKS mengajar rata-rata per semester.
+2. **Tabel 2 (Daya Tampung & Seleksi Mahasiswa Baru):** Data kuantitatif 5 tahun akademik terakhir mencakup: daya tampung, jumlah pendaftar lulus seleksi akademik, jumlah mahasiswa baru reguler, jumlah mahasiswa baru transfer, jumlah total mahasiswa aktif reguler, dan persentase kelulusan tepat waktu.
+3. **Tabel 3 (Kurikulum, Struktur SKS, & Peta RPS):** Distribusi sebaran mata kuliah per semester, penentuan mata kuliah wajib universitas, mata kuliah penciri keilmuan prodi, bobot SKS teori, bobot SKS praktikum/lapangan, serta status kepemilikan dokumen Rencana Pembelajaran Semester (RPS) berbasis Outcome-Based Education (OBE).
+4. **Tabel 4 (Produktivitas Riset & Publikasi Ilmiah Dosen):** Jumlah luaran riset yang berhasil dipublikasikan dosen tetap di jurnal nasional terakreditasi (Sinta 1-6) dan jurnal internasional bereputasi terindeks global (Scopus/SJR), seminar nasional terindeks, seminar internasional, paten/HAKI, buku ajar ber-ISBN, serta dana hibah penelitian internal dan eksternal (Kemendikbudristek/swasta).
 
-### III. Format Isian Cepat untuk Tabel Dosen
-Salin teks di bawah ini, isi datanya, dan gunakan sebagai **Referensi Data** untuk generate draf LKPS otomatis:
+---
+
+### II. DAFTAR PERTANYAAN VALIDASI DATA DENGAN UNIT PENDUKUNG
+Lakukan konfirmasi dan wawancara internal dengan unit operator PDDIKTI, Biro Administrasi Akademik (BAA), dan Lembaga Penelitian dan Pengabdian Masyarakat (LPPM) terkait aspek berikut:
+
+- **Aspek 1 (Sinkronisasi Data PDDIKTI):** Apakah seluruh data beban kerja mengajar dosen tetap prodi ${program.name} di sistem SIAKAD universitas sudah tersinkronisasi 100% dan bebas dari anomali di laman PDDikti Kemendikbud?
+- **Aspek 2 (Rasio Dosen-Mahasiswa):** Apakah rasio rill perbandingan antara dosen tetap berhomebase prodi dengan jumlah mahasiswa aktif telah memenuhi ambang batas minimum legalitas nasional agar tidak terkena sanksi pembatasan izin?
+- **Aspek 3 (Tracer Study & Masa Tunggu):** Bagaimana penentuan kriteria kesesuaian bidang kerja alumni? Apakah menggunakan klasifikasi standar KBJI (Klasifikasi Baku Jabatan Indonesia) untuk memverifikasi tingkat relevansi pekerjaan lulusan?
+- **Aspek 4 (Ketersediaan RPS OBE):** Apakah seluruh tim dosen pengampu mata kuliah telah memperbarui RPS lama ke format OBE yang mengukur tingkat ketercapaian PL (Pembelajaran Lulusan)?
+
+---
+
+### III. TEMPLATE INPUT DATA RINGKAS SIAP-GEN
+Anda dapat menyalin contoh format input berikut, memperbaruinya dengan data riil program studi Anda, lalu memasukkannya ke kotak input **\"Referensi Data\"** pada panel kiri untuk digenerate secara penuh oleh sistem AI:
+
 \`\`\`text
-[DOSEN-1] Nama: Prof. Dr. Ahmad Fauzi, Pendidikan: S3, Jafung: Guru Besar, Sertifikasi: Ya, Bidang: Sistem Akreditasi
-[DOSEN-2] Nama: Dr. Siti Rahma, Pendidikan: S3, Jafung: Lektor Kepala, Sertifikasi: Ya, Bidang: Manajemen Mutu
-[MAHASISWA] Baru 2024: 120, Baru 2025: 145, Aktif Total: 420
-\`\`\`
+=== PROFIL DOSEN TETAP ===
+[DOSEN-1] Nama: Prof. Dr. Ahmad Fauzi, NIDN: 0412037201, Pendidikan: S3 Doktor Ilmu Komputer (Universitas Indonesia), Jafung: Guru Besar, Sertifikat Pendidik: Ya, Bidang Keahlian: Rekayasa Perangkat Lunak, Beban Kerja: 12 SKS.
+[DOSEN-2] Nama: Dr. Siti Rahma, M.T., NIDN: 0418058102, Pendidikan: S3 Doktor Teknologi Informasi (ITB Bandung), Jafung: Lektor Kepala, Sertifikat Pendidik: Ya, Bidang Keahlian: Tata Kelola Sistem Informasi, Beban Kerja: 14 SKS.
+[DOSEN-3] Nama: Budi Hartono, M.Cs., NIDN: 0422118803, Pendidikan: S2 Magister Ilmu Komputer (UGM Yogyakarta), Jafung: Lektor, Sertifikat Pendidik: Ya, Bidang Keahlian: Kecerdasan Buatan, Beban Kerja: 16 SKS.
 
-> *Saran: Tempelkan data format di atas yang sudah Anda lengkapi ke dalam kolom 'Referensi Data' untuk menyusun tabel LKPS siap pakai.*`;
+=== STATISTIK MAHASISWA BARU & AKTIF ===
+- Tahun Akademik 2023/2024: Daya Tampung: 150, Pendaftar: 850, Lulus Seleksi: 180, Mahasiswa Baru Reguler: 145, Total Mahasiswa Aktif: 410.
+- Tahun Akademik 2024/2025: Daya Tampung: 150, Pendaftar: 980, Lulus Seleksi: 195, Mahasiswa Baru Reguler: 155, Total Mahasiswa Aktif: 435.
+- Tahun Akademik 2025/2026: Daya Tampung: 160, Pendaftar: 1120, Lulus Seleksi: 210, Mahasiswa Baru Reguler: 165, Total Mahasiswa Aktif: 460.
+\`\`\``;
         } else {
-          offlineText = `# 📋 PANDUAN INTERAKTIF PENGUMPULAN DATA LEGALITAS, SK, & SURAT PENGANTAR
-## Dokumen: Legalitas & Kerangka SPMI
-## Program Studi: ${program.name} (${program.level}) - ${program.lam}
+          offlineText = `# 📋 PANDUAN PENGUMPULAN DATA LEGALITAS, SK TIM, & KERANGKA KEBIJAKAN SPMI
+## DOKUMEN: LEGALITAS & SISTEM PENJAMINAN MUTU INTERNAL (SPMI)
+## Program Studi: ${program.name} (${program.level}) - Lembaga Akreditasi: ${program.lam}
 
-${referenceSection}### I. Kebutuhan Informasi Dokumen Legalitas
-Untuk menyiapkan draf legalitas dan kerangka tata kerja tim akreditasi, pastikan informasi ini telah disepakati:
-1. **Nomor Surat & Tanggal Pengajuan:** Penomoran resmi surat keluar dari Fakultas/Dekanat.
-2. **Personel Tim Akreditasi:** Susunan lengkap tim penyusun akreditasi prodi (Ketua, Sekretaris, Koordinator LED, Koordinator LKPS).
-3. **Siklus Mutu SPMI:** Konsep penerapan siklus PPEPP penjaminan mutu yang berlaku di perguruan tinggi Anda.
+${referenceSection}### I. DESKRIPSI KEBUTUHAN DATA UTAMA DOKUMEN LEGALITAS
+Penyusunan berkas legalitas dan dokumen tata kerja penjaminan mutu memerlukan sinkronisasi regulasi tingkat perguruan tinggi dan dekanat. Persiapkan data dan informasi kunci berikut:
 
-### II. Daftar Pertanyaan Koordinasi Tim Akreditasi
-Sebelum menerbitkan SK dan Surat Pengantar, rapat koordinasi pertama harus menyepakati:
-1. **Tanggung Jawab:** Apa batas tanggung jawab dan tenggat waktu pengisian data untuk masing-masing bidang (LED vs LKPS)?
-2. **Alur Koordinasi:** Bagaimana mekanisme review internal sebelum dokumen final diserahkan ke Dekanat untuk diajukan ke ${program.lam}?
-3. **Sistem Pengarsipan Bukti:** Di mana seluruh folder bukti fisik (evidence) akreditasi akan disimpan secara digital untuk mempermudah asesmen lapangan?
+1. **Surat Keputusan (SK) Izin Operasional:** Nomor SK, tanggal terbit, dan pejabat kementerian yang menerbitkan izin resmi penyelenggaraan program studi ${program.name}.
+2. **Surat Keputusan (SK) Akreditasi Terakhir:** Peringkat akreditasi yang diperoleh (A, B, C, Unggul, Baik Sekali, Baik) beserta masa berlaku SK tersebut.
+3. **Susunan Tim Penyusun Akreditasi (Task Force):** Penetapan susunan personalia kepanitiaan penyusunan dokumen LED dan LKPS berdasarkan Surat Keputusan (SK) Dekan Fakultas.
+4. **Instrumen Siklus Mutu SPMI:** Bukti pelaksanaan siklus PPEPP tingkat program studi mencakup dokumen kebijakan SPMI, manual SPMI, standar SPMI, dan ketersediaan formulir/checklist mutu harian.
 
-### III. Template Isian Personel Tim Akreditasi
-Isi list berikut untuk draf dokumen SK otomatis:
-- Dekan Fakultas: [Nama Lengkap & NIP/NIDN]
-- Ketua Tim Akreditasi: [Nama Lengkap & NIP/NIDN]
-- Sekretaris: [Nama Lengkap & NIP/NIDN]
-- Penanggung Jawab Kriteria 1-3: [Nama Lengkap]
-- Penanggung Jawab Kriteria 4-9: [Nama Lengkap]
+---
 
-> *Saran: Isi informasi personel di atas, tempelkan di kotak 'Referensi Data', lalu lakukan generate draf legalitas.*`;
+### II. DAFTAR PERTANYAAN DISKUSI TIM PANITIA (TASK FORCE)
+Rapat pleno perdana tim penyusun akreditasi disarankan menjawab dan menyepakati hal-hal berikut:
+
+- **Pertanyaan 1 (Distribusi Beban Kerja Panitia):** Bagaimana pembagian penanggung jawab kriteria LED? Siapa yang bertanggung jawab mengompilasi bukti fisik kuantitatif LKPS untuk Kriteria 4 (SDM) dan Kriteria 5 (Keuangan)?
+- **Pertanyaan 2 (Mekanisme Kendali Mutu Dokumen):** Bagaimana alur koordinasi pengoreksian draf tulisan? Apakah draf akan direview secara berkala oleh Lembaga Penjaminan Mutu (LPM) tingkat Universitas sebelum diunggah ke portal SAPTO/LAM?
+- **Pertanyaan 3 (Time Management / Timeline):** Kapan draf awal (Draf 1) harus selesai ditulis? Berapa minggu alokasi waktu yang disediakan untuk proses finalisasi dokumen, uji keterbacaan, pengunggahan dokumen, dan simulasi asesmen lapangan?
+
+---
+
+### III. TEMPLATE ISIAN STRUKTUR PANITIA AKREDITASI
+Isilah list di bawah ini dengan nama lengkap beserta gelar akademis dan NIP/NIDN yang benar. Tempelkan isian ini pada kolom **\"Referensi Data\"** untuk menyusun dokumen SK secara lengkap dan formal:
+
+- **Pejabat Penerbit SK (Dekan):** [Nama Dekan, Gelar, NIP/NIDN]
+- **Ketua Tim Penyusun (Task Force):** [Nama Kaprodi/Dosen Senior, NIDN]
+- **Sekretaris Tim:** [Nama Sekretaris Prodi/Dosen, NIDN]
+- **Penanggung Jawab Bidang LED (Laporan Evaluasi Diri):** [Nama Dosen Utama]
+- **Penanggung Jawab Bidang LKPS (Laporan Kinerja):** [Nama Dosen/Operator SIAKAD]
+- **Koordinator Hubungan Masyarakat & Alumni:** [Nama Dosen/Humas]
+- **Staf Administratrasi & Pengarsipan Eviden:** [Nama Tenaga Kependidikan]`;
         }
       } else {
         // DIRECT GENERATION WITH OPTIONAL REFERENCE DATA
         if (selectedDocType === 'kriteria_mutu') {
           const critName = lamInfo.criteriaNames[selectedCriteriaKey] || "Kriteria Mutu";
-          offlineText = `# DRAF EVALUASI KRITERIA MUTU ${selectedCriteriaKey.toUpperCase()}: ${critName}
-## Program Studi: ${program.name} (${program.level})
-## Fakultas: ${program.faculty}
-## Lembaga Akreditasi: ${program.lam}
+          offlineText = `# 📄 DRAF EVALUASI DOKUMEN AKREDITASI KRITERIA MUTU ${selectedCriteriaKey.toUpperCase()}: ${critName}
+## PROGRAM STUDI: ${program.name} (${program.level})
+## FAKULTAS: ${program.faculty}
+## LEMBAGA AKREDITASI: ${program.lam}
 
-${referenceSection}### I. Deskripsi Kondisi & Analisis SWOT
-${referenceText && referenceText.trim() !== '' ? `*Draf disusun dengan mengintegrasikan data referensi Anda terkait kriteria ini:*
-- **Analisis Kondisi Nyata:** Berdasarkan data masukan, prodi menunjukkan kinerja operasional yang solid dan sesuai standar penjaminan mutu.
-- **Kekuatan (Strengths):** ${referenceText.slice(0, 100)}... Memiliki kurikulum berbasis KKNI dan OBE (Outcome-Based Education) yang sangat relevan.` : `- **Kekuatan (Strengths):** Memiliki kurikulum berbasis KKNI dan OBE (Outcome-Based Education) yang sangat relevan dengan standar ${program.lam}. Profil kaprodi dan dosen pengajar sesuai dengan standar rasio minimum.`}
-- **Kelemahan (Weaknesses):** Integrasi hasil penelitian dosen ke dalam materi pembelajaran interaktif masih perlu dioptimalkan secara terstruktur untuk mahasiswa.
-- **Peluang (Opportunities):** Permintaan industri dan institusi nasional terhadap lulusan ${program.name} terus meningkat secara berkelanjutan seiring perkembangan zaman.
-- **Ancaman (Threats):** Tingkat persaingan yang ketat dengan lulusan program sejenis dari universitas nasional terkemuka.
+${referenceSection}### I. LATAR BELAKANG & KONDISI EVALUASI MUTU INTERNAL
+Kriteria ${selectedCriteriaKey.toUpperCase()} - ${critName} pada Program Studi ${program.name} dirancang untuk mengukur dan menjamin tata kelola berkelanjutan serta pencapaian kualitas yang prima. Berdasarkan data evaluasi internal dan selaras dengan standar mutu yang dicanangkan oleh Lembaga Akreditasi ${program.lam}, program studi menunjukkan efisiensi operasional yang sangat baik. Implementasi kurikulum berbasis Outcome-Based Education (OBE) dan penguatan kapasitas dosen tetap bergelar Doktor menjadi modal utama prodi dalam mempertahankan dan meningkatkan reputasi akademik nasional maupun internasional. Dukungan penuh dekanat Fakultas ${program.faculty} mempermudah alokasi sarana prasarana canggih yang memperlancar jalannya tridharma perguruan tinggi.
 
-### II. Rencana Tindak Lanjut Strategis (Action Plan)
-| No | Upaya Peningkatan | Indikator Kinerja Utama | Target Waktu | Penanggung Jawab |
-|---|---|---|---|---|
-| 1 | Lokakarya integrasi penelitian ke kurikulum | Tersedianya silabus/RPS terintegrasi | Semester Depan | Kaprodi / Tim Kurikulum |
-| 2 | Pembinaan sertifikasi profesi mahasiswa | 85% Lulusan tersertifikasi nasional | 12 Bulan | Unit Kemahasiswaan |
+### II. ANALISIS SWOT KOMPREHENSIF (STRENGTHS, WEAKNESSES, OPPORTUNITIES, THREATS)
 
-> *Catatan: Draf ini digenerate dalam mode offline aman sebagai draf terstruktur berbasis template.*`;
-        } else if (selectedDocType === 'led') {
-          offlineText = `# LAPORAN EVALUASI DIRI (LED) KOMPREHENSIF
-## Program Studi: ${program.name} (${program.level}) - Fakultas ${program.faculty}
-## Akreditasi Target: ${program.lam}
+#### A. Kekuatan (Strengths)
+1. **Kurikulum Mutakhir Berstandar Internasional:** Kurikulum program studi telah sepenuhnya mengintegrasikan kerangka KKNI level 6 serta prinsip Outcome-Based Education (OBE) dengan fokus pada keterampilan analitik tingkat tinggi dan penguasaan praktis yang terukur.
+2. **Kualifikasi Akademis Dosen yang Optimal:** Memiliki rasio kecukupan dosen tetap bergelar Doktor (S3) sebesar 42.5%, jauh melampaui standar minimal BAN-PT. Rata-rata dosen tetap memiliki sertifikasi pendidik profesional resmi dari kementerian.
+3. **Kemitraan Strategis Sektor Industri:** Hubungan sinergis dengan asosiasi profesi nasional dan mitra industri mempermudah pelaksanaan program magang bersertifikat dan penyerapan lulusan secara langsung.
 
-${referenceSection}### BAB I: PENDAHULUAN
-Program Studi ${program.name} berkomitmen penuh untuk menyelenggarakan pendidikan tinggi berkualitas prima demi mencetak generasi unggul berdaya saing global sesuai standar nasional dan kriteria penjaminan mutu ${program.lam}.
+#### B. Kelemahan (Weaknesses)
+1. **Pemanfaatan Hasil Penelitian dalam Pengajaran:** Integrasi luaran riset inovatif dosen tetap ke dalam buku ajar atau materi perkuliahan interaktif masih berada di angka 65% dan memerlukan standardisasi tertulis.
+2. **Rasio Publikasi Jurnal Bereputasi Internasional:** Meskipun publikasi jurnal nasional Sinta tergolong tinggi, sebaran publikasi internasional terindeks bereputasi (seperti Scopus tingkat kuartil Q1 atau Q2) masih terpusat pada beberapa dosen senior saja.
 
-### BAB II: EVALUASI KINERJA UNIT PENGELOLA (UPPS)
-1. **Visi, Misi, Tujuan, dan Strategi:** Visi Keilmuan prodi adalah "*${program.profile?.vision || "Menjadi program studi unggul berdaya saing nasional"}*" yang diturunkan ke dalam langkah misi strategis yang sistematis.
-2. **Sistem Penjaminan Mutu:** Implementasi siklus PPEPP (Penetapan, Pelaksanaan, Evaluasi, Pengendalian, dan Peningkatan) berjalan secara konsisten di tingkat program studi dan fakultas.
-3. **Mahasiswa dan Lulusan:** Standar input mahasiswa yang ketat menghasilkan rasio kelulusan tepat waktu yang sangat memuaskan.
+#### C. Peluang (Opportunities)
+1. **Pendanaan Riset Kolaboratif Multinasional:** Terbukanya berbagai skema hibah riset internasional dari lembaga mitra luar negeri yang menawarkan kolaborasi riset hibrida dan pertukaran pengajar.
+2. **Program Merdeka Belajar Kampus Merdeka (MBKM):** Skema perluasan kerja sama penukaran mahasiswa merdeka antar-universitas ternama yang menaikkan daya tarik prodi bagi pendaftar luar daerah.
 
-${referenceText && referenceText.trim() !== '' ? `### BAB III: INTEGRASI DATA REFERENSI PENGGUNA
-Berikut adalah analisis penyelarasan fakta dari data bukti yang Anda lampirkan:
-- **Fakta Bukti Lapangan:** ${referenceText}
-- **Rekomendasi Asesor:** Data di atas sangat kuat untuk diajukan sebagai eviden pendukung bab tata kelola dan SDM.` : ''}
-
-### BAB IV: ANALISIS SWOT INTEGRATIF
-- **Strengths:** Dukungan penuh dari dekanat, reputasi baik di tingkat lokal, serta dosen bersertifikasi pendidik profesional.
-- **Weaknesses:** Kuantitas publikasi internasional bereputasi (Scopus/Sinta 1-2) masih perlu didorong.
-- **Opportunities:** Kerja sama strategis dengan asosiasi profesi bidang ${program.lam}.
-- **Threats:** Kecepatan adaptasi teknologi kurikulum baru di tingkat industri global.
-
-> *Catatan: Draf offline dibuat otomatis untuk membantu visualisasi struktur instrumen.*`;
-        } else if (selectedDocType === 'lkps') {
-          offlineText = `# LAPORAN KINERJA PROGRAM STUDI (LKPS)
-## Program Studi: ${program.name} (${program.level}) - Fakultas ${program.faculty}
-
-${referenceSection}### Tabel 1: Profil Kualifikasi Dosen Tetap (Disesuaikan dengan Referensi)
-${referenceText && referenceText.trim() !== '' ? `*Menampilkan dosen berdasarkan data referensi yang Anda masukkan:*` : ''}
-| No | Nama Dosen | Pendidikan | Jabatan Akademik | Bidang Keahlian | Sertifikasi |
-|---|---|---|---|---|---|
-| 1 | Prof. Dr. Ahmad Fauzi | S3 Doktor | Guru Besar | Ilmu ${program.name} | Pendidik Prof. |
-| 2 | Dr. Siti Rahma, M.T. | S3 Doktor | Lektor Kepala | Metodologi Riset | Pendidik Prof. |
-| 3 | Budi Hartono, M.Cs. | S2 Magister | Lektor | Keilmuan Terapan | Terdaftar |
-
-### Tabel 2: Kurikulum & Pembelajaran
-| Semester | Kode MK | Nama Mata Kuliah | Bobot SKS | Sifat MK | RPS Terlampir |
-|---|---|---|---|---|---|
-| I | MKU101 | Pendidikan Agama &amp; Etika | 2 SKS | Wajib | Ya |
-| III | MKP302 | Teori Bidang Inti | 3 SKS | Wajib | Ya |
-| VIII | MKS499 | Tugas Akhir / Skripsi | 6 SKS | Wajib | Ya |
-
-### Tabel 3: Data Aktivitas Penelitian &amp; PKM
-| Tahun | Judul Publikasi/Pengabdian | Jurnal/Media Publikasi | Kategori Sinta | Dana Hibah |
-|---|---|---|---|---|
-| 2024 | Kajian Teoretis Sistem ${program.name} | Jurnal Teknologi Nasional | Sinta 3 | Internal UPPS |
-| 2025 | Implementasi Pengabdian Masyarakat | Jurnal Pengabdian Mandiri | Sinta 4 | Hibah Dikti |
-
-> *Catatan: Draf data simulasi siap disesuaikan dengan data riil dari PDDIKTI.*`;
-        } else {
-          offlineText = `# DRAF DOKUMEN LEGALITAS & PENJAMINAN MUTU (SPMI)
-## Program Studi: ${program.name} (${program.level}) - Fakultas ${program.faculty}
-
-${referenceSection}### 1. Format Surat Pengantar Pengajuan Akreditasi
-Nomor: 015/F/${program.faculty.toUpperCase()}/VI/2026
-Lampiran: 1 (Satu) Berkas Lengkap LED & LKPS
-Perihal: Permohonan Pengajuan Akreditasi Program Studi ${program.name}
-
-Kepada Yth.
-**Direktur Dewan Eksekutif ${program.lam}**
-Jakarta, Indonesia
-
-Dengan hormat, bersama surat ini kami mengajukan permohonan akreditasi untuk Program Studi ${program.name} jenjang ${program.level} di lingkungan Fakultas ${program.faculty}. Seluruh berkas instrumen LED dan LKPS telah kami siapkan sesuai pedoman resmi.
-
-Hormat kami,
-**Dekan Fakultas ${program.faculty}**
+#### D. Ancaman (Threats)
+1. **Persaingan Global Lulusan:** Derasnya persaingan dengan lulusan luar negeri yang didukung oleh kepemilikan sertifikasi kompetensi global yang diakui luas di industri multinasional.
+2. **Kecepatan Disrupsi Teknologi Informasi:** Perubahan lanskap kebutuhan industri yang sangat dinamis, menuntut pembaruan kurikulum secara berkala setiap 2-3 tahun sekali.
 
 ---
 
-### 2. Surat Keputusan (SK) Tim Akreditasi Prodi
-**MEMUTUSKAN:**
-- **Ketua Panitia:** Dr. Siti Rahma, M.T.
-- **Sekretaris:** Budi Hartono, M.Cs.
-- **Koordinator Bidang LED:** Dr. Ahmad Fauzi
-- **Koordinator Bidang LKPS:** Dr. H. Faisal
+### III. RENCANA TINDAK LANJUT STRATEGIS (STRATEGIC ACTION PLAN)
+Untuk memperkuat capaian mutu Kriteria ${selectedCriteriaKey.toUpperCase()} dan menindaklanjuti kelemahan yang diidentifikasi, disusun matriks rencana aksi terstruktur berikut:
 
-> *Catatan: Draf offline dibuat otomatis untuk membantu visualisasi struktur instrumen.*`;
+| No | Sasaran & Program Aksi | Indikator Kinerja Utama (IKU) | Target Waktu (Timeline) | Anggaran Estimasi | Penanggung Jawab |
+|---|---|---|---|---|---|
+| 1 | Lokakarya Integrasi Riset Inovatif Dosen ke Modul Ajar | Tersedianya 100% RPS baru terintegrasi hasil penelitian mutakhir dosen tetap | Semester Ganjil 2026/2027 | Rp 12.000.000,- | Ketua Program Studi & Tim Kurikulum |
+| 2 | Hibah Insentif Penulisan Artikel Ilmiah Scopus Q1/Q2 | Publikasi minimal 5 artikel ilmiah di jurnal internasional terindeks global | 12 Bulan Akademik | Rp 45.000.000,- | Kepala LPPM & Dekan Fakultas |
+| 3 | Standardisasi Sertifikasi Kompetensi Profesi Mahasiswa | Meningkatnya proporsi lulusan tersertifikasi keahlian menjadi minimal 85% | 18 Bulan Akademik | Rp 30.000.000,- | Unit Kemahasiswaan & Gugus Mutu |
+| 4 | Audit Mutu Internal (AMI) Berbasis Risiko (Risk-Based) | Terlaksananya 1 siklus AMI lengkap dengan laporan tinjauan manajemen | Setiap Akhir Semester | Rp 8.000.000,- | Unit Penjaminan Mutu (UPM) |
+
+---
+
+### IV. REKOMENDASI DAN LANGKAH PENINGKATAN STANDAR MUTU
+Berdasarkan hasil evaluasi diri kualitatif dan kuantitatif ini, tim penjaminan mutu merekomendasikan peningkatan nilai standar mutu internal perguruan tinggi untuk kriteria ini dari predikat \"Sangat Baik\" menuju \"Unggul\" secara konsisten. Seluruh data bukti fisik (evidence) pendukung wajib diarsipkan secara digital pada repositori cloud kampus agar dapat divalidasi dengan cepat oleh dewan penilai (asesor) dari Lembaga Akreditasi ${program.lam} saat visitasi lapangan berlangsung.`;
+        } else if (selectedDocType === 'led') {
+          offlineText = `# 📄 LAPORAN EVALUASI DIRI (LED) DOKUMEN AKREDITASI KOMPREHENSIF
+## PROGRAM STUDI: ${program.name} (${program.level})
+## FAKULTAS: ${program.faculty}
+## AKREDITASI TARGET: ${program.lam}
+
+${referenceSection}---
+
+## BAB I: PENDAHULUAN
+
+### 1.1 Kondisi Eksternal Program Studi
+Program Studi ${program.name} beroperasi di tengah lingkungan pendidikan tinggi yang sangat dinamis dan dipengaruhi oleh disrupsi teknologi, transisi ekonomi global, serta regulasi kurikulum Outcome-Based Education (OBE). Kebutuhan pasar kerja akan lulusan bidang ${program.name} yang memiliki kecakapan analitis tajam, penguasaan literasi digital mumpuni, serta kepribadian berkarakter luhur menuntut program studi untuk terus memperbarui kurikulum operasionalnya. Secara demografis, minat calon mahasiswa baru terhadap prodi ini menunjukkan pertumbuhan tren positif sebesar 15% setiap tahunnya, membuktikan tingginya tingkat kepercayaan masyarakat.
+
+### 1.2 Profil Unit Pengelola Program Studi (UPPS)
+Fakultas ${program.faculty} selaku Unit Pengelola Program Studi menaungi program studi ${program.name} dengan menyediakan dukungan kepemimpinan berkarakter kredibel, transparan, akuntabel, adil, dan bertanggung jawab. UPPS memiliki struktur organisasi yang kokoh didukung oleh pembagian tugas tata kelola yang jelas berdasarkan Surat Keputusan Dekan. Seluruh aspek tata kelola didukung oleh keaktifan Gugus Penjaminan Mutu (GPM) fakultas yang mengawal mutu layanan pengajaran, pengelolaan prasarana laboratorium, serta ketersediaan anggaran operasional tridharma perguruan tinggi.
+
+### 1.3 Sejarah Singkat dan Dasar Legalitas Pendirian
+Program Studi ${program.name} didirikan berdasarkan Keputusan Menteri Pendidikan dan Kebudayaan Republik Indonesia Nomor SK Pendirian yang sah, dan telah berkontribusi mencetak alumni andalan yang tersebar luas di berbagai instansi pemerintahan maupun swasta. Untuk mempertahankan standar kualitas terbaik, program studi ini mengajukan usulan proses akreditasi kepada Lembaga Akreditasi Mandiri ${program.lam} dengan melampirkan berkas Laporan Evaluasi Diri (LED) dan Laporan Kinerja Program Studi (LKPS) komprehensif ini.
+
+---
+
+## BAB II: HASIL EVALUASI DIRI (9 KRITERIA UTAMA)
+
+### 2.1 Evaluasi Kriteria Visi, Misi, Tujuan, dan Strategi (VMTS)
+Visi Keilmuan Program Studi ${program.name} ditetapkan secara selaras dengan Visi Universitas, yaitu:
+> **"${program.profile?.vision || "Menjadi program studi yang unggul, inovatif, dan berdaya saing tinggi dalam mengintegrasikan riset mutakhir dengan kearifan lokal guna mencetak lulusan berakhlak mulia di tingkat Asia Tenggara pada tahun 2030."}"**
+Sosialisasi Visi Misi dilaksanakan secara intensif kepada seluruh pemangku kepentingan (dosen, mahasiswa, alumni, serta mitra kerja) melalui berbagai media digital, poster kampus, rapat kerja rutin, serta pembekalan mahasiswa baru. Indeks pemahaman VMTS berdasarkan survei internal mencapai nilai rata-rata 3.75 dari skala 4.00 (Sangat Baik).
+
+### 2.2 Evaluasi Kriteria Tata Pamong, Tata Kelola, dan Kerja Sama
+Tata pamong program studi menjamin berjalannya fungsi kepemimpinan yang partisipatif, kredibel, dan akuntabel. Kerja sama tridharma perguruan tinggi telah dijalin secara aktif dengan berbagai institusi nasional maupun internasional, mencakup skema pertukaran mahasiswa, kolaborasi publikasi jurnal ilmiah terakreditasi, dan program magang kerja profesional mahasiswa. Saat ini tercatat ada 12 Perjanjian Kerja Sama (MoA) aktif yang mendukung langsung proses pengajaran praktis di dalam prodi.
+
+### 2.3 Evaluasi Kriteria Sumber Daya Manusia (SDM)
+Sumber Daya Manusia prodi menjadi tulang punggung utama keunggulan akademik. Prodi ${program.name} diperkuat oleh dosen-dosen tetap yang memiliki kesesuaian keahlian linier dengan mata kuliah yang diampunya. Jumlah dosen bergelar S3 (Doktor) mencapai 42.5%, sementara dosen bergelar Magister (S2) yang sedang menempuh studi lanjut S3 berjumlah 4 orang. Beban kerja dosen (BKD) dievaluasi berkala setiap semester melalui sistem online LKD kementerian guna menjamin pemenuhan kewajiban tridharma dosen yang seimbang.
+
+---
+
+## BAB III: ANALISIS SWOT INTEGRATIF & RENCANA PENGEMBANGAN
+
+### 3.1 Sintesis Analisis SWOT
+- **Kekuatan (Strengths):** Visi keilmuan sangat terarah, didukung kualifikasi dosen S3 Doktor yang optimal, kurikulum OBE mutakhir, serta dukungan finansial UPPS yang mapan.
+- **Kelemahan (Weaknesses):** Jumlah artikel ilmiah dosen yang berhasil terbit di jurnal internasional bereputasi terindeks Scopus masih perlu ditingkatkan dan didistribusikan merata ke seluruh dosen muda.
+- **Peluang (Opportunities):** Akses pendanaan riset eksternal dari Kemendikbudristek dan lembaga donor swasta yang terbuka lebar, serta kerja sama hibrida global.
+- **Ancaman (Threats):** Tingginya standar ekspektasi kompetensi industri digital dan persaingan ketat lulusan dengan universitas asing.
+
+### 3.2 Strategi Pemecahan Masalah dan Keberlanjutan (Sustainability)
+Program Studi telah merumuskan 3 strategi utama keberlanjutan:
+1. **Pemberian Insentif Penulisan Jurnal Scopus:** Bantuan pendanaan biaya translasi artikel ilmiah serta biaya publikasi (Article Processing Charge) penuh untuk meningkatkan motivasi dosen.
+2. **Kemitraan Kurikulum Industri (Co-design Curriculum):** Mengundang praktisi ahli dari perusahaan nasional terkemuka untuk mengajar di kelas secara hibrida minimal 20% dari total jam kuliah dalam program Praktisi Mengajar.
+3. **Penguatan Sistem Informasi SPMI:** Migrasi seluruh formulir evaluasi pengajaran harian ke platform digital berbasis mobile guna mempercepat proses pengambilan keputusan perbaikan mutu pembelajaran.`;
+        } else if (selectedDocType === 'lkps') {
+          offlineText = `# 📄 LAPORAN KINERJA PROGRAM STUDI (LKPS) - MATRIKS DATA TERSTRUKTUR
+## PROGRAM STUDI: ${program.name} (${program.level})
+## FAKULTAS: ${program.faculty}
+## TAHUN PENYUSUNAN: 2026
+
+${referenceSection}### TABEL 1: PROFIL KUALIFIKASI AKADEMIK & FUNGSIONAL DOSEN TETAP PRODI
+Berikut adalah data validasi keaktifan, kepemilikan sertifikasi pendidik profesional, tingkat pendidikan formal, dan kesesuaian bidang keilmuan dosen tetap yang mengampu mata kuliah inti pada Program Studi ${program.name}:
+
+| No | Nama Dosen Tetap | NIDN / NIDK | Pendidikan Terakhir | Perguruan Tinggi Kelulusan | Jabatan Fungsional Akademik | Sertifikasi Pendidik | Kesesuaian Kompetensi Inti |
+|---|---|---|---|---|---|---|---|
+| 1 | Prof. Dr. Ahmad Fauzi, M.T. | 0412037201 | S3 Doktor | Universitas Indonesia | Guru Besar | Ya (Sertifikasi) | Sangat Sesuai (RPL & Kurikulum) |
+| 2 | Dr. Siti Rahma, M.Kom. | 0418058102 | S3 Doktor | Institut Teknologi Bandung | Lektor Kepala | Ya (Sertifikasi) | Sangat Sesuai (Tata Kelola SI) |
+| 3 | Budi Hartono, M.Cs. | 0422118803 | S2 Magister | Universitas Gadjah Mada | Lektor | Ya (Sertifikasi) | Sesuai (Kecerdasan Buatan) |
+| 4 | Dr. H. Faisal, M.T. | 0415107904 | S3 Doktor | Universitas Indonesia | Lektor Kepala | Ya (Sertifikasi) | Sangat Sesuai (Riset Operasional) |
+| 5 | Larasati, M.T. | 0430099205 | S2 Magister | Institut Teknologi Sepuluh Nopember | Asisten Ahli | Terdaftar | Sesuai (Pemrograman Lanjut) |
+
+*Analisis Kinerja SDM:* Rata-rata persentase dosen dengan gelar S3 mencapai 60% dari sampel tabel utama di atas, menunjukkan dominasi keilmuan yang kuat. Beban kerja mengajar masing-masing dosen tetap berada pada rentang aman 12 hingga 16 SKS per semester sesuai dengan ketentuan perundang-undangan (BKD).
+
+---
+
+### TABEL 2: STATISTIK SELEKSI MAHASISWA BARU & DAYA TAMPUNG (3 TAHUN TERAKHIR)
+Rekapitulasi data minat pendaftar, kapasitas tampung, tingkat selektivitas keketatan, dan mahasiswa aktif dalam kurun waktu 3 tahun akademik terakhir:
+
+| Tahun Akademik | Daya Tampung | Jumlah Pendaftar | Lulus Seleksi Akademik | Jumlah Mahasiswa Baru (Reguler) | Jumlah Mahasiswa Baru (Transfer) | Jumlah Total Mahasiswa Aktif |
+|---|---|---|---|---|---|---|
+| 2023/2024 | 150 | 850 | 180 | 145 | 5 | 410 |
+| 2024/2025 | 150 | 980 | 195 | 155 | 2 | 435 |
+| 2025/2026 | 160 | 1120 | 210 | 165 | 4 | 460 |
+
+*Analisis Trend Keketatan:* Rasio selektivitas pendaftaran (jumlah pendaftar dibanding yang lulus seleksi) pada tahun terakhir mencapai 1:5.3, membuktikan tingginya tingkat kompetisi masuk dan minat masyarakat terhadap mutu program studi ${program.name}.
+
+---
+
+### TABEL 3: KURIKULUM SEBARAN MATA KULIAH INTI DAN BOBOT SKS
+Rincian kurikulum operasional yang menunjukkan keseimbangan beban teori dan praktikum sebagai upaya menyelaraskan kemampuan psikomotorik lulusan:
+
+| No | Kode MK | Nama Mata Kuliah Inti | Bobot SKS (Teori) | Bobot SKS (Praktikum) | Total SKS | Semester | Ketersediaan Dokumen RPS (OBE) |
+|---|---|---|---|---|---|---|---|
+| 1 | INF101 | Pemrograman Dasar & Algoritma | 2 | 1 | 3 | I | Tersedia (Pembaruan 2025) |
+| 2 | INF204 | Struktur Data & Analisis Algoritma | 2 | 1 | 3 | II | Tersedia (Pembaruan 2025) |
+| 3 | INF302 | Basis Data Terdistribusi | 2 | 1 | 3 | III | Tersedia (Pembaruan 2026) |
+| 4 | INF401 | Kecerdasan Buatan & Machine Learning | 3 | 0 | 3 | IV | Tersedia (Pembaruan 2026) |
+| 5 | INF505 | Arsitektur Enterprise | 3 | 0 | 3 | V | Tersedia (Pembaruan 2025) |
+| 6 | INF602 | Metodologi Penelitian Bidang Ilmu | 2 | 0 | 2 | VI | Tersedia (Pembaruan 2026) |
+| 7 | INF800 | Tugas Akhir / Skripsi Komprehensif | 0 | 6 | 6 | VIII | Tersedia (Pembaruan 2026) |
+
+---
+
+### TABEL 4: PRODUKTIVITAS PUBLIKASI ILMIAH & LUARAN TRIDHARMA DOSEN
+Rekapitulasi kuantitas sebaran karya ilmiah dan kekayaan intelektual dosen tetap prodi dalam 3 tahun kalender akademik terakhir:
+
+| No | Nama Penulis Dosen | Judul Publikasi Ilmiah Inovatif | Nama Jurnal / Forum Publikasi | Kategori Akreditasi / Indeks | Tahun Terbit | Sumber Pendanaan |
+|---|---|---|---|---|---|---|
+| 1 | Prof. Dr. Ahmad Fauzi | *An Innovative Cloud-Based Architecture for Higher Education ERP* | International Journal of Software Engineering | Scopus Q2 (SJR 0.45) | 2024 | Hibah Eksternal Dikti |
+| 2 | Dr. Siti Rahma | *Optimasi Tata Kelola SPMI Perguruan Tinggi Menggunakan Algoritma Heuristik* | Jurnal Sistem Informasi Nasional | Sinta 2 (Terakreditasi) | 2025 | DIPA UPPS Internal |
+| 3 | Budi Hartono, M.Cs. | *Implementasi Deep Learning untuk Deteksi Plagiarisme Karya Ilmiah* | IEEE International Conference on AI | Scopus Indexed (Conference) | 2025 | Hibah Riset Mandiri |`;
+        } else {
+          offlineText = `# 📄 DOKUMEN LEGALITAS, SK TASK FORCE AKREDITASI, & KERANGKA SPMI FORMAL
+## PROGRAM STUDI: ${program.name} (${program.level})
+## FAKULTAS: ${program.faculty}
+## TAHUN PENERBITAN: 2026
+
+${referenceSection}---
+
+### 1. FORMAT SURAT PENGANTAR PENGAJUAN AKREDITASI RESMI DEKANAT
+
+**KOP SURAT RESMI UNIVERSITAS & FAKULTAS ${program.faculty.toUpperCase()}**
+*Jalan Kampus Utama No. 45, Gedung Dekanat Lantai 2, Indonesia*
+*Telepon: (021) 555-1234 | Email: dekanat@univ-utama.ac.id*
+____________________________________________________________________________________
+
+Nomor: **184/UN-F.${program.faculty.toUpperCase().slice(0,4)}/LL/2026**
+Lampiran: **1 (Satu) Berkas Pengajuan Akreditasi Lengkap (LED & LKPS)**
+Perihal: **Permohonan Akreditasi Program Studi ${program.name} (${program.level})**
+
+Kepada Yth.
+**Ketua Dewan Eksekutif ${program.lam}**
+Gedung Kementerian Pendidikan Tinggi, Lantai 4
+Jakarta, Indonesia
+
+Dengan hormat,
+
+Berdasarkan komitmen peningkatan mutu akademik berkelanjutan, kami selaku Pimpinan Fakultas ${program.faculty} dengan ini mengajukan permohonan akreditasi untuk program studi berikut:
+
+- **Nama Program Studi:** ${program.name}
+- **Jenjang Pendidikan:** ${program.level} (Sarjana)
+- **Status Akreditasi Saat Ini:** Terakreditasi Baik Sekali (Masa Berlaku hingga November 2026)
+
+Bersama surat pengantar ini, kami melampirkan berkas instrumen akreditasi berupa Laporan Evaluasi Diri (LED) dan Laporan Kinerja Program Studi (LKPS) yang telah disusun secara komprehensif oleh Tim Task Force Program Studi, divalidasi oleh Gugus Mutu Fakultas, serta disetujui oleh Lembaga Penjaminan Mutu (LPM) Universitas.
+
+Demikian permohonan ini kami sampaikan dengan harapan proses visitasi dan asesmen lapangan dapat berjalan lancar. Atas perhatian, arahan, dan kerja sama Dewan Eksekutif ${program.lam}, kami ucapkan terima kasih yang sebesar-besarnya.
+
+Hormat kami,
+
+**Prof. Dr. Ir. H. Mulyono**
+Dekan Fakultas ${program.faculty}
+*NIP. 19741203 199903 1 002*
+
+---
+
+### 2. SURAT KEPUTUSAN (SK) DEKAN TENTANG TIM PENYUSUN AKREDITASI PRODI
+
+**SURAT KEPUTUSAN DEKAN FAKULTAS ${program.faculty.toUpperCase()}**
+**NOMOR: 421/SK/DEK/${program.faculty.toUpperCase().slice(0,4)}/VI/2026**
+
+**TENTANG**
+**PEMBENTUKAN TIM TASK FORCE (TIM PENYUSUN DOKUMEN AKREDITASI)**
+**PROGRAM STUDI ${program.name.toUpperCase()} TAHUN AKADEMIK 2026**
+
+**DEKAN FAKULTAS ${program.faculty.toUpperCase()},**
+
+- **Menimbang:** 
+  1. Bahwa masa berlaku akreditasi Program Studi ${program.name} akan segera berakhir pada tahun 2026;
+  2. Bahwa guna menjamin kelancaran penyiapan, pengisian data, penyusunan, dan finalisasi dokumen LED serta LKPS, perlu dibentuk tim kerja khusus (Task Force);
+  3. Bahwa personel yang tercantum dalam lampiran Surat Keputusan ini dinilai cakap, berdedikasi, dan memenuhi syarat akademis untuk melaksanakan tugas tersebut.
+
+- **Mengingat:**
+  1. Undang-Undang RI Nomor 12 Tahun 2012 tentang Pendidikan Tinggi;
+  2. Peraturan Menteri Pendidikan dan Kebudayaan RI Nomor 3 Tahun 2020 tentang Standar Nasional Pendidikan Tinggi (SN-Dikti);
+  3. Statuta Universitas Utama Tahun 2022.
+
+**MEMUTUSKAN:**
+
+- **Menetapkan:**
+  - **PERTAMA:** Membentuk Tim Task Force (Penyusun Dokumen Akreditasi) Program Studi ${program.name} dengan susunan personalia sebagaimana tercantum pada lampiran Surat Keputusan ini.
+  - **KEDUA:** Tim Task Force bertanggung jawab penuh merencanakan, mengumpulkan data rujukan, menyusun naskah evaluasi diri kualitatif, melengkapi tabel data kinerja kuantitatif, serta melakukan pengunggahan berkas secara resmi ke portal ${program.lam}.
+  - **KETIGA:** Segala biaya yang timbul akibat diterbitkannya keputusan ini dibebankan sepenuhnya pada Anggaran DIPA Fakultas ${program.faculty} Tahun Akademik 2026.
+  - **KEEMPAT:** Keputusan ini mulai berlaku sejak tanggal ditetapkan, dengan ketentuan apabila dikemudian hari terdapat kekeliruan, akan dilakukan perbaikan sebagaimana mestinya.
+
+Ditetapkan di: Gedung Dekanat
+Pada tanggal: 30 Juni 2026
+
+**Dekan Fakultas ${program.faculty}**
+
+**Prof. Dr. Ir. H. Mulyono**
+*NIP. 19741203 199903 1 002*
+
+**LAMPIRAN SK DEKAN FAKULTAS ${program.faculty.toUpperCase()} NOMOR: 421/SK/DEK/${program.faculty.toUpperCase().slice(0,4)}/VI/2026**
+
+| No | Nama Personel & Gelar | Jabatan dalam Tim Akreditasi | Tugas Pokok Utama |
+|---|---|---|---|
+| 1 | Dr. Siti Rahma, M.Kom. | Ketua Tim Task Force | Mengoordinasi jalannya rapat, memonitor timeline, melakukan final review draf |
+| 2 | Budi Hartono, M.Cs. | Sekretaris Tim | Menyusun notulensi rapat, administrasi persuratan, pengumpulan eviden digital |
+| 3 | Prof. Dr. Ahmad Fauzi | Koordinator Bidang LED | Menulis naskah narasi evaluasi diri 9 kriteria dan analisis SWOT integratif |
+| 4 | Dr. H. Faisal, M.T. | Koordinator Bidang LKPS | Melakukan kompilasi data kuantitatif ke dalam format tabel LKPS mandatori |
+| 5 | Larasati, M.T. | Koordinator Eviden & Repositori | Mengurus kearsipan berkas bukti fisik pada cloud storage penjaminan mutu |
+
+---
+
+### 3. KERANGKA KEBIJAKAN SISTEM PENJAMINAN MUTU INTERNAL (SPMI)
+
+Sistem Penjaminan Mutu Internal (SPMI) pada Program Studi ${program.name} dijalankan secara konsisten mengikuti siklus regulasi **PPEPP (Penetapan, Pelaksanaan, Evaluasi, Pengendalian, Peningkatan)** yang terintegrasi penuh:
+
+\`\`\`text
+[Penetapan Standar Mutu] -> [Pelaksanaan Kegiatan] -> [Evaluasi Capaian (AMI)]
+         ^                                                      |
+         |                                                      v
+[Peningkatan Mutu Baru] <------- [Pengendalian & RTM] <---------+
+\`\`\`
+
+1. **Penetapan Standar (P):** Senat Akademik menetapkan 24 standar utama mutu pendidikan, riset, dan PKM yang mengacu pada SN-Dikti serta standar tambahan spesifik prodi (misalnya penguasaan keterampilan bahasa asing dan sertifikasi pemrograman kompetensi industri).
+2. **Pelaksanaan Standar (P):** Seluruh civitas akademika (dosen, mahasiswa, tendik) melaksanakan harian kegiatan sesuai dengan standar mutu, diawasi oleh standar operasional prosedur (SOP) akademik yang ketat.
+3. **Evaluasi Standar (E):** Gugus Mutu melaksanakan Audit Mutu Internal (AMI) secara independen di setiap akhir semester kalender akademik guna mengevaluasi deviasi pelaksanaan terhadap standar.
+4. **Pengendalian Standar (P):** Temuan-temuan ketidaksesuaian dibahas secara terarah pada forum Rapat Tinjauan Manajemen (RTM) di tingkat UPPS guna melahirkan rekomendasi perbaikan korektif jangka pendek.
+5. **Peningkatan Standar (P):** Atas dasar rekomendasi RTM, standar mutu internal ditingkatkan secara berkala pada tahun berikutnya demi menjamin Continuous Quality Improvement (CQI) berkelanjutan.`;
         }
       }
 
@@ -694,6 +966,42 @@ Hormat kami,
       setGeneratedText(offlineText);
       setGeneratedFileName(fileName);
       setIsGenerating(false);
+
+      // Immediately reflect the generated document in the checklist menu as 'Draf'
+      const docKey = selectedDocType as 'led' | 'lkps' | 'legalitas';
+      if (selectedDocType !== 'kriteria_mutu') {
+        const today = new Date().toISOString().split('T')[0];
+        const updatedDocs = {
+          ...program.documents,
+          [docKey]: {
+            status: 'Draf' as DocStatus,
+            lastUpdated: today,
+            fileName: fileName
+          }
+        };
+        onUpdateProgram({
+          ...program,
+          documents: updatedDocs
+        });
+
+        // Also save to database berkas_akreditasi!
+        const jenisDokumen = docKey === 'legalitas' ? 'IZIN' : docKey.toUpperCase();
+        fetch('/api/prodi/berkas-akreditasi', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prodi_id: program.id,
+            jenis_dokumen: jenisDokumen,
+            status_berkas: 'Draf',
+            nama_file: fileName,
+            file_url: null,
+            konten_markdown: offlineText
+          })
+        }).catch(err => {
+          console.error("Gagal menyimpan berkas offline ke Supabase:", err);
+        });
+      }
+
       triggerSuccessToast(generationMode === 'interactive' ? "Panduan Wawancara & Data berhasil digenerate!" : "Draf lokal berhasil dibuat secara instan!");
     }, 600);
   };
@@ -992,6 +1300,24 @@ Hormat kami,
         documents: updatedDocs
       };
       onUpdateProgram(updatedProgram);
+
+      // Persist the applied status and content to berkas_akreditasi table!
+      const jenisDokumen = docKey === 'legalitas' ? 'IZIN' : docKey.toUpperCase();
+      fetch('/api/prodi/berkas-akreditasi', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prodi_id: program.id,
+          jenis_dokumen: jenisDokumen,
+          status_berkas: status,
+          nama_file: generatedFileName,
+          file_url: null,
+          konten_markdown: generatedText
+        })
+      }).catch(err => {
+        console.error("Gagal melakukan sinkronisasi applied berkas_akreditasi:", err);
+      });
+
       triggerSuccessToast(`Dokumen ${docKey.toUpperCase()} berhasil dimutakhirkan sebagai ${status}!`);
     }
   };

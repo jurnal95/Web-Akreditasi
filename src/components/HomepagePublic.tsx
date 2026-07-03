@@ -132,7 +132,7 @@ export default function HomepagePublic({ programs, onLoginClick }: HomepagePubli
           
           <h1 className="font-sans font-extrabold text-3xl md:text-5xl tracking-tight text-slate-900 mb-4 max-w-4xl mx-auto leading-tight">
             Transparansi Mutu &amp; Akses Publik <br />
-            <span className="text-indigo-600">Akreditasi Program Studi Kampus</span>
+            <span className="text-indigo-600">Akreditasi Program Studi Universitas Islam Bogor</span>
           </h1>
           
           <p className="text-slate-500 text-sm md:text-base max-w-2xl mx-auto leading-relaxed mb-8">

@@ -9,6 +9,8 @@ import {
   Clock, X, Mail, Phone, User, Award, ShieldAlert, CheckSquare, 
   Building2, ArrowUpRight, BarChart2, Check, RefreshCw, Search
 } from 'lucide-react';
+import Markdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { StudyProgram, LAMCluster, AccreditationStatus, DocStatus } from '../types';
 import InteractiveAccreditationChart from './InteractiveAccreditationChart';
 
@@ -31,6 +33,32 @@ export default function DashboardSuperAdmin({
   // State for Add/Edit Modal
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingProgram, setEditingProgram] = useState<StudyProgram | null>(null);
+
+  // State for Reviewing Berkas Akreditasi
+  const [selectedReviewProdi, setSelectedReviewProdi] = useState<StudyProgram | null>(null);
+  const [reviewDocuments, setReviewDocuments] = useState<any[]>([]);
+  const [isReviewLoading, setIsReviewLoading] = useState(false);
+  const [isReviewOpen, setIsReviewOpen] = useState(false);
+  const [expandedDocId, setExpandedDocId] = useState<string | null>(null);
+
+  const handleReviewProdi = async (p: StudyProgram) => {
+    setSelectedReviewProdi(p);
+    setIsReviewLoading(true);
+    setIsReviewOpen(true);
+    setReviewDocuments([]);
+    setExpandedDocId(null);
+    try {
+      const res = await fetch(`/api/prodi/berkas-akreditasi/${p.id}`);
+      if (res.ok) {
+        const data = await res.json();
+        setReviewDocuments(data || []);
+      }
+    } catch (err) {
+      console.error("Gagal mengambil data review berkas:", err);
+    } finally {
+      setIsReviewLoading(false);
+    }
+  };
 
   // Account Management States
   const [activeTab, setActiveTab] = useState<'master' | 'accounts'>('master');
@@ -580,7 +608,11 @@ export default function DashboardSuperAdmin({
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-slate-800 text-xs">
                   {filteredPrograms.map(p => (
-                    <tr key={p.id} className="hover:bg-slate-50/50 transition-colors">
+                    <tr 
+                      key={p.id} 
+                      onClick={() => handleReviewProdi(p)}
+                      className="hover:bg-slate-100/85 transition-colors cursor-pointer"
+                    >
                       <td className="px-6 py-4 font-mono font-bold text-slate-500">{p.code}</td>
                       <td className="px-6 py-4">
                         <div className="font-bold text-slate-900">{p.name} ({p.level})</div>
@@ -589,35 +621,19 @@ export default function DashboardSuperAdmin({
                       <td className="px-6 py-4 font-semibold text-slate-600">{p.lam}</td>
                       <td className="px-6 py-4">
                         {(() => {
-                          let docScore = 0;
-                          if (p.documents.led.status === 'Final') docScore += 10;
-                          else if (p.documents.led.status === 'Draf') docScore += 5;
-                          
-                          if (p.documents.lkps.status === 'Final') docScore += 10;
-                          else if (p.documents.lkps.status === 'Draf') docScore += 5;
-                          
-                          if (p.documents.legalitas.status === 'Final') docScore += 10;
-                          else if (p.documents.legalitas.status === 'Draf') docScore += 5;
-
-                          let critScore = 0;
-                          const criteriaKeys = ['k1', 'k2', 'k3', 'k4', 'k5', 'k6', 'k7', 'k8'] as const;
-                          criteriaKeys.forEach(key => {
-                            const status = p.criteriaProgress[key];
-                            if (status === 'Siap') critScore += 10;
-                            else if (status === 'Proses') critScore += 5;
-                          });
-
-                          const docPercent = (docScore / 30) * 45;
-                          const critPercent = (critScore / 80) * 55;
-                          const pct = Math.round(docPercent + critPercent);
+                          let count = 0;
+                          if (p.documents.led.status === 'Final' || p.documents.led.status === 'Draf') count++;
+                          if (p.documents.lkps.status === 'Final' || p.documents.lkps.status === 'Draf') count++;
+                          if (p.documents.legalitas.status === 'Final' || p.documents.legalitas.status === 'Draf') count++;
+                          const pct = Math.round((count / 3) * 100);
                           
                           return (
                             <div className="flex items-center space-x-2">
                               <div className="w-12 bg-slate-100 rounded-full h-2 overflow-hidden">
                                 <div 
                                   className={`h-full rounded-full transition-all duration-300 ${
-                                    pct >= 80 ? 'bg-emerald-500' :
-                                    pct >= 50 ? 'bg-amber-400' :
+                                    pct >= 100 ? 'bg-emerald-500' :
+                                    pct >= 33 ? 'bg-amber-400' :
                                     'bg-slate-400'
                                   }`}
                                   style={{ width: `${pct}%` }}
@@ -644,7 +660,10 @@ export default function DashboardSuperAdmin({
                       <td className="px-6 py-4 text-right">
                         <div className="inline-flex space-x-1.5">
                           <button
-                            onClick={() => handleOpenEdit(p)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleOpenEdit(p);
+                            }}
                             className="p-1.5 rounded-md text-slate-600 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
                             title="Edit data master prodi"
                             id={`btn-edit-prodi-${p.id}`}
@@ -652,7 +671,10 @@ export default function DashboardSuperAdmin({
                             <Edit2 className="h-3.5 w-3.5" />
                           </button>
                           <button
-                            onClick={() => handleDelete(p.id, p.name)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDelete(p.id, p.name);
+                            }}
                             className="p-1.5 rounded-md text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors"
                             title="Hapus prodi"
                             id={`btn-delete-prodi-${p.id}`}
@@ -1087,6 +1109,173 @@ export default function DashboardSuperAdmin({
               </div>
 
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* REVIEW BERKAS AKREDITASI MODAL */}
+      {isReviewOpen && selectedReviewProdi && (
+        <div className="fixed inset-0 z-50 overflow-y-auto" aria-labelledby="modal-title" role="dialog" aria-modal="true">
+          <div className="flex items-center justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            {/* Background Overlay */}
+            <div 
+              className="fixed inset-0 bg-slate-900/60 backdrop-blur-3xs transition-opacity" 
+              onClick={() => setIsReviewOpen(false)}
+            />
+            
+            <span className="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
+
+            {/* Modal Box */}
+            <div 
+              className="relative z-10 inline-block align-bottom bg-white rounded-2xl text-left overflow-hidden shadow-2xl transform transition-all sm:my-8 sm:align-middle sm:max-w-4xl sm:w-full border border-slate-200"
+            >
+              {/* Header */}
+              <div className="bg-slate-900 text-white px-6 py-4 flex justify-between items-center">
+                <div className="flex items-center space-x-2.5">
+                  <div className="bg-emerald-600 p-2 rounded-lg text-white">
+                    <CheckSquare className="h-4.5 w-4.5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-extrabold uppercase tracking-wider">
+                      Review Dokumen &amp; Berkas Akreditasi
+                    </h3>
+                    <p className="text-[10px] text-slate-400 font-bold uppercase mt-0.5 tracking-wider leading-none">
+                      {selectedReviewProdi.name} ({selectedReviewProdi.level})
+                    </p>
+                  </div>
+                </div>
+                <button 
+                  type="button"
+                  onClick={() => setIsReviewOpen(false)}
+                  className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-white/10 transition-colors cursor-pointer"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              {/* Content */}
+              <div className="p-6 space-y-5 max-h-[70vh] overflow-y-auto">
+                <div className="border-b border-slate-100 pb-3">
+                  <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Informasi Program Studi</span>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-2 text-xs">
+                    <div>
+                      <span className="text-slate-400 block font-medium">Lembaga Akreditasi:</span>
+                      <span className="font-extrabold text-slate-800">{selectedReviewProdi.lam}</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-400 block font-medium">Status Akreditasi Saat Ini:</span>
+                      <span className="font-extrabold text-slate-800">{selectedReviewProdi.accreditationStatus}</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-400 block font-medium">Nomor SK / Masa Berlaku:</span>
+                      <span className="font-extrabold text-slate-800">{selectedReviewProdi.skNumber} ({selectedReviewProdi.expiryDate})</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Daftar Berkas Utama (Tabel berkas_akreditasi)</span>
+                  
+                  {isReviewLoading ? (
+                    <div className="py-12 text-center text-slate-400 text-xs font-semibold">
+                      <RefreshCw className="h-6 w-6 animate-spin mx-auto mb-3 text-indigo-500" />
+                      <span>Sedang memuat berkas real-time dari database...</span>
+                    </div>
+                  ) : (
+                    (['LED', 'LKPS', 'IZIN'] as const).map(jenis => {
+                      // Look up the document in fetched reviewDocuments
+                      const docRecord = reviewDocuments.find(b => String(b.jenis_dokumen).toUpperCase() === jenis);
+                      
+                      // Fallback status/date from local program state if database row is not yet created
+                      const docLabel = 
+                        jenis === 'LED' ? 'Laporan Evaluasi Diri (LED)' : 
+                        jenis === 'LKPS' ? 'Laporan Kinerja Program Studi (LKPS)' : 
+                        'Surat Legalitas & Izin Operasional';
+
+                      // Find matching local doc state
+                      const localDocKey = jenis === 'IZIN' ? 'legalitas' : jenis.toLowerCase() as 'led' | 'lkps';
+                      const localDoc = selectedReviewProdi.documents[localDocKey];
+
+                      const statusBerkas = docRecord?.status_berkas || localDoc?.status || 'Belum Ada';
+                      const namaFile = docRecord?.nama_file || localDoc?.fileName || 'Belum ada file diunggah';
+                      const updatedAt = docRecord?.updated_at 
+                        ? new Date(docRecord.updated_at).toLocaleString('id-ID', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+                        : (localDoc?.lastUpdated && localDoc.lastUpdated !== '-' ? localDoc.lastUpdated : 'Belum pernah diperbarui');
+
+                      const markdownContent = docRecord?.konten_markdown || null;
+
+                      return (
+                        <div 
+                          key={jenis} 
+                          className="border border-slate-200 rounded-xl overflow-hidden bg-slate-50/30"
+                        >
+                          {/* Row Summary */}
+                          <div className="p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 bg-white border-b border-slate-100">
+                            <div>
+                              <div className="flex items-center space-x-2">
+                                <span className="text-xs font-black text-slate-900">{docLabel}</span>
+                                <span className="text-[9px] uppercase font-black bg-slate-100 border border-slate-200 px-1.5 py-0.5 rounded-sm font-mono text-slate-500">{jenis}</span>
+                              </div>
+                              <p className="text-[11px] text-slate-500 font-mono mt-1 select-all">
+                                File: {namaFile}
+                              </p>
+                              <p className="text-[10px] text-slate-400 mt-0.5">
+                                Diperbarui: {updatedAt}
+                              </p>
+                            </div>
+
+                            <div className="flex items-center space-x-2 shrink-0">
+                              <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider border ${
+                                statusBerkas === 'Final' ? 'bg-emerald-50 text-emerald-800 border-emerald-200' :
+                                statusBerkas === 'Draf' ? 'bg-amber-50 text-amber-800 border-amber-200' :
+                                'bg-slate-50 text-slate-600 border-slate-200'
+                              }`}>
+                                {statusBerkas}
+                              </span>
+
+                              {markdownContent && (
+                                <button
+                                  type="button"
+                                  onClick={() => setExpandedDocId(expandedDocId === jenis ? null : jenis)}
+                                  className="px-3 py-1 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 font-black text-[10px] uppercase tracking-wider rounded-lg transition-colors flex items-center space-x-1 cursor-pointer"
+                                >
+                                  <span>{expandedDocId === jenis ? 'Tutup Preview' : 'Lihat Isi AI'}</span>
+                                </button>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Markdown Preview Area */}
+                          {expandedDocId === jenis && markdownContent && (
+                            <div className="p-5 max-h-80 overflow-y-auto bg-slate-50 border-t border-slate-100 text-xs text-slate-800 leading-relaxed">
+                              <div className="max-w-none prose prose-slate">
+                                <div className="markdown-body">
+                                  <Markdown remarkPlugins={[remarkGfm]}>
+                                    {markdownContent}
+                                  </Markdown>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+
+              {/* Close Button */}
+              <div className="bg-slate-50 px-6 py-4 border-t border-slate-150 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setIsReviewOpen(false)}
+                  className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-5 py-2 rounded-xl text-xs transition-colors shadow-xs cursor-pointer"
+                >
+                  Selesai Review
+                </button>
+              </div>
+
+            </div>
           </div>
         </div>
       )}

@@ -6,6 +6,7 @@
 import React from 'react';
 import { GraduationCap, Lock, LogOut, Award, ShieldAlert, LayoutDashboard, Globe } from 'lucide-react';
 import { UserSession } from '../types';
+import logoImg from '../assets/logo.png';
 
 interface NavbarProps {
   session: UserSession | null;
@@ -26,17 +27,12 @@ export default function Navbar({ session, onLoginClick, onLogout, currentView, o
             onClick={() => onNavigate('public')}
             id="navbar-logo"
           >
-            <div className="bg-indigo-600 p-2 rounded-lg text-white">
-              <GraduationCap className="h-5 w-5" />
-            </div>
-            <div>
-              <span className="font-sans font-bold text-lg tracking-tight text-slate-800">
-                AkridaKampus
-              </span>
-              <span className="block text-[10px] font-mono tracking-wider uppercase text-slate-400 font-semibold leading-none mt-0.5">
-                Akreditasi & Mutu Internal
-              </span>
-            </div>
+            <img 
+              src={logoImg} 
+              alt="Universitas Islam Bogor Logo" 
+              className="h-10 w-auto object-contain"
+              referrerPolicy="no-referrer"
+            />
           </div>
 
           {/* Nav Links / Profile */}
