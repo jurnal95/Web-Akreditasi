@@ -1,6 +1,6 @@
 {
-  "name": "Remix: Monitoring Akreditasi Kampus",
-  "description": "Sistem Informasi Monitoring dan Publikasi Akreditasi Program Studi di Kampus",
+  "name": "Monitoring Akreditasi Universitas Islam Bogor",
+  "description": "Sistem Informasi Penjaminan Mutu & Publikasi Real-Time Akreditasi Program Studi Universitas Islam Bogor",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

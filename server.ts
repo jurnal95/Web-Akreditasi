@@ -5,6 +5,7 @@
 
 import express from "express";
 import path from "path";
+import fs from "fs";
 import { GoogleGenAI } from "@google/genai";
 import { createServer as createViteServer } from "vite";
 import { createClient } from "@supabase/supabase-js";
@@ -14,6 +15,34 @@ import { fileURLToPath } from "url";
 const require = createRequire(import.meta.url);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Fallback JSON-file path for berkas_akreditasi in case the table doesn't exist in Supabase
+const FALLBACK_FILE_PATH = path.join(process.cwd(), "berkas_fallback.json");
+
+// Helper to read local berkas fallback
+function readLocalBerkas(): any[] {
+  try {
+    if (fs.existsSync(FALLBACK_FILE_PATH)) {
+      const content = fs.readFileSync(FALLBACK_FILE_PATH, "utf-8");
+      return JSON.parse(content) || [];
+    }
+  } catch (err) {
+    console.warn("Failed to read local berkas fallback file:", err);
+  }
+  return [];
+}
+
+// Helper to write local berkas fallback
+function writeLocalBerkas(data: any[]) {
+  try {
+    fs.writeFileSync(FALLBACK_FILE_PATH, JSON.stringify(data, null, 2), "utf-8");
+  } catch (err) {
+    console.warn("Failed to write local berkas fallback file:", err);
+  }
+}
+
+// Global flag to track if we should stick to local fallback
+let forceLocalBerkasFallback = false;
 const { PDFParse } = require("pdf-parse");
 const mammoth = require("mammoth");
 const multer = require("multer");
@@ -145,18 +174,207 @@ app.post("/api/auth/login", async (req, res) => {
 // 1.5 FETCH ALL PRODI (Tabel prodi)
 app.get("/api/prodi", async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { data: prodiData, error: prodiError } = await supabase
       .from('prodi')
       .select('*');
 
-    if (error) {
-      console.warn("Get prodi from Supabase error:", error.message);
-      return res.status(500).json({ error: error.message });
+    if (prodiError) {
+      console.warn("Get prodi from Supabase error:", prodiError.message);
+      return res.status(500).json({ error: prodiError.message });
     }
 
-    return res.json(data || []);
+    // Try fetching all berkas_akreditasi
+    let berkasData: any[] = [];
+    let isTableMissing = forceLocalBerkasFallback;
+
+    if (!isTableMissing) {
+      const { data, error: berkasError } = await supabase
+        .from('berkas_akreditasi')
+        .select('*');
+
+      if (berkasError) {
+        console.warn("Get berkas_akreditasi from Supabase error:", berkasError.message);
+        if (berkasError.message?.includes("Could not find the table") || berkasError.message?.includes("does not exist") || berkasError.message?.includes("cache")) {
+          forceLocalBerkasFallback = true;
+          isTableMissing = true;
+        }
+      } else {
+        berkasData = data || [];
+      }
+    }
+
+    if (isTableMissing) {
+      console.log("Using local JSON file fallback for berkas_akreditasi (Fetch All)");
+      berkasData = readLocalBerkas();
+    }
+
+    // Combine prodi with their respective berkas
+    const combined = (prodiData || []).map((p: any) => {
+      const prodiBerkas = (berkasData || []).filter((b: any) => toUUID(b.prodi_id) === toUUID(p.id));
+      return {
+        ...p,
+        berkas: prodiBerkas
+      };
+    });
+
+    return res.json(combined);
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
+  }
+});
+
+// 1.5.1 FETCH ALL BERKAS AKREDITASI FOR A PRODI
+app.get("/api/prodi/berkas-akreditasi/:prodiId", async (req, res) => {
+  try {
+    const { prodiId } = req.params;
+    const uuid = toUUID(prodiId);
+    
+    let berkasData: any[] = [];
+    let isTableMissing = forceLocalBerkasFallback;
+
+    if (!isTableMissing) {
+      const { data, error } = await supabase
+        .from('berkas_akreditasi')
+        .select('*')
+        .eq('prodi_id', uuid);
+
+      if (error) {
+        console.warn("Get berkas_akreditasi error:", error.message);
+        if (error.message?.includes("Could not find the table") || error.message?.includes("does not exist") || error.message?.includes("cache")) {
+          forceLocalBerkasFallback = true;
+          isTableMissing = true;
+        } else {
+          return res.status(500).json({ error: error.message });
+        }
+      } else {
+        berkasData = data || [];
+      }
+    }
+
+    if (isTableMissing) {
+      const localData = readLocalBerkas();
+      berkasData = localData.filter((b: any) => toUUID(b.prodi_id) === uuid);
+    }
+
+    return res.json(berkasData || []);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// 1.5.2 UPSERT BERKAS AKREDITASI
+app.post("/api/prodi/berkas-akreditasi", async (req, res) => {
+  try {
+    const { prodi_id, jenis_dokumen, status_berkas, nama_file, file_url, konten_markdown } = req.body;
+
+    if (!prodi_id || !jenis_dokumen) {
+      return res.status(400).json({ error: "prodi_id dan jenis_dokumen wajib diisi." });
+    }
+
+    const pUuid = toUUID(prodi_id);
+    const docTypeUpper = String(jenis_dokumen).toUpperCase(); // e.g. LED, LKPS, IZIN
+
+    let isTableMissing = forceLocalBerkasFallback;
+    let result: any = null;
+
+    if (!isTableMissing) {
+      try {
+        // Check if record already exists
+        const { data: existing, error: checkError } = await supabase
+          .from('berkas_akreditasi')
+          .select('id')
+          .eq('prodi_id', pUuid)
+          .eq('jenis_dokumen', docTypeUpper)
+          .maybeSingle();
+
+        if (checkError) {
+          console.warn("Check berkas_akreditasi existing error:", checkError.message);
+          if (checkError.message?.includes("Could not find the table") || checkError.message?.includes("does not exist") || checkError.message?.includes("cache")) {
+            forceLocalBerkasFallback = true;
+            isTableMissing = true;
+          }
+        }
+
+        if (!isTableMissing) {
+          const payload: any = {
+            prodi_id: pUuid,
+            jenis_dokumen: docTypeUpper,
+            status_berkas: status_berkas || 'Belum Ada',
+            nama_file: nama_file || null,
+            file_url: file_url || null,
+            konten_markdown: konten_markdown || null,
+            updated_at: new Date().toISOString()
+          };
+
+          if (existing && existing.id) {
+            // Update
+            const { data: updated, error: updateError } = await supabase
+              .from('berkas_akreditasi')
+              .update(payload)
+              .eq('id', existing.id)
+              .select();
+
+            if (updateError) {
+              console.error("Update berkas_akreditasi error:", updateError.message);
+              throw updateError;
+            }
+            result = updated?.[0];
+          } else {
+            // Insert
+            const { data: inserted, error: insertError } = await supabase
+              .from('berkas_akreditasi')
+              .insert(payload)
+              .select();
+
+            if (insertError) {
+              console.error("Insert berkas_akreditasi error:", insertError.message);
+              throw insertError;
+            }
+            result = inserted?.[0];
+          }
+        }
+      } catch (dbErr: any) {
+        if (dbErr.message && (dbErr.message.includes("Could not find the table") || dbErr.message.includes("does not exist") || dbErr.message.includes("cache"))) {
+          forceLocalBerkasFallback = true;
+          isTableMissing = true;
+        } else {
+          throw dbErr;
+        }
+      }
+    }
+
+    if (isTableMissing) {
+      console.log("Saving berkas_akreditasi to local fallback");
+      const localData = readLocalBerkas();
+      const existingIdx = localData.findIndex(
+        (b: any) => toUUID(b.prodi_id) === pUuid && String(b.jenis_dokumen).toUpperCase() === docTypeUpper
+      );
+
+      const payload: any = {
+        id: existingIdx !== -1 ? localData[existingIdx].id : `berkas-${pUuid}-${docTypeUpper}`,
+        prodi_id: pUuid,
+        jenis_dokumen: docTypeUpper,
+        status_berkas: status_berkas || 'Belum Ada',
+        nama_file: nama_file || null,
+        file_url: file_url || null,
+        konten_markdown: konten_markdown || null,
+        updated_at: new Date().toISOString()
+      };
+
+      if (existingIdx !== -1) {
+        localData[existingIdx] = payload;
+      } else {
+        localData.push(payload);
+      }
+
+      writeLocalBerkas(localData);
+      result = payload;
+    }
+
+    return res.json({ success: true, data: result });
+  } catch (err: any) {
+    console.error("Upsert berkas_akreditasi error:", err);
+    return res.status(500).json({ error: err.message || "Gagal menyimpan berkas akreditasi." });
   }
 });
 
@@ -357,32 +575,152 @@ function splitTextIntoChunks(text: string, chunkSize: number = 1500, overlap: nu
   return chunks.filter(c => c.length > 0);
 }
 
-// HELPER: Get vector embedding from Gemini API using gemini-embedding-2-preview
-async function getEmbedding(text: string): Promise<number[]> {
-  try {
-    if (!process.env.GEMINI_API_KEY) {
-      throw new Error("GEMINI_API_KEY is not defined in the environment secrets.");
+// Sleep helper
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Suppress pdfjs standardFontDataUrl warning
+const runWithSuppressedPdfWarnings = async <T>(fn: () => Promise<T>): Promise<T> => {
+  const originalWarn = console.warn;
+  const originalError = console.error;
+  
+  console.warn = (...args: any[]) => {
+    const msg = args.join(" ");
+    if (msg.includes("standardFontDataUrl") || msg.includes("UnknownErrorException")) {
+      return;
     }
-    const ai = new GoogleGenAI({
-      apiKey: process.env.GEMINI_API_KEY,
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build",
+    originalWarn(...args);
+  };
+  
+  console.error = (...args: any[]) => {
+    const msg = args.join(" ");
+    if (msg.includes("standardFontDataUrl") || msg.includes("UnknownErrorException")) {
+      return;
+    }
+    originalError(...args);
+  };
+  
+  try {
+    return await fn();
+  } finally {
+    console.warn = originalWarn;
+    console.error = originalError;
+  }
+};
+
+// HELPER: Get vector embedding from Gemini API using gemini-embedding-2-preview with retry
+async function getEmbedding(text: string, retries = 3, initialDelay = 1000): Promise<number[]> {
+  let delay = initialDelay;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      if (!process.env.GEMINI_API_KEY) {
+        throw new Error("GEMINI_API_KEY is not defined in the environment secrets.");
+      }
+      const ai = new GoogleGenAI({
+        apiKey: process.env.GEMINI_API_KEY,
+        httpOptions: {
+          headers: {
+            "User-Agent": "aistudio-build",
+          }
+        }
+      });
+      const response = await ai.models.embedContent({
+        model: "gemini-embedding-2-preview",
+        contents: text,
+      });
+      if (response && response.embeddings && response.embeddings[0] && response.embeddings[0].values) {
+        return response.embeddings[0].values;
+      }
+      throw new Error("Invalid response format from Gemini embedding model.");
+    } catch (err: any) {
+      const isRateLimit = err.message?.includes("429") || err.status === 429 || err.message?.includes("quota") || err.message?.includes("RESOURCE_EXHAUSTED");
+      if (isRateLimit && attempt < retries) {
+        const backoff = delay * Math.pow(2, attempt) + Math.random() * 500;
+        console.warn(`Gemini Embedding Rate Limit (429) hit. Retrying attempt ${attempt}/${retries} in ${Math.round(backoff)}ms...`);
+        await sleep(backoff);
+      } else if (attempt === retries) {
+        console.error("Embedding generation failed after retries:", err.message);
+        throw err;
+      } else {
+        await sleep(500);
+      }
+    }
+  }
+  throw new Error("Failed to get embedding");
+}
+
+// HELPER: Get vector embeddings for a batch of texts with retry, exponential backoff, and size chunking
+async function getEmbeddingsBatchWithRetry(texts: string[], maxBatchSize = 15, retries = 3, initialDelay = 1000): Promise<(number[] | null)[]> {
+  const allEmbeddings: (number[] | null)[] = [];
+  
+  // Chunk the texts array into smaller batches
+  const batches: string[][] = [];
+  for (let i = 0; i < texts.length; i += maxBatchSize) {
+    batches.push(texts.slice(i, i + maxBatchSize));
+  }
+  
+  console.log(`RAG: Membagi ${texts.length} chunk menjadi ${batches.length} batch untuk pemrosesan embedding.`);
+
+  for (let b = 0; b < batches.length; b++) {
+    const batch = batches[b];
+    if (b > 0) {
+      // Small sleep between batches to respect rate limits
+      await sleep(1000);
+    }
+    
+    let batchEmbeddings: (number[] | null)[] | null = null;
+    let delay = initialDelay;
+    
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        if (!process.env.GEMINI_API_KEY) {
+          throw new Error("GEMINI_API_KEY is not defined in the environment secrets.");
+        }
+        const ai = new GoogleGenAI({
+          apiKey: process.env.GEMINI_API_KEY,
+          httpOptions: {
+            headers: {
+              "User-Agent": "aistudio-build",
+            }
+          }
+        });
+        
+        console.log(`RAG: Meminta embedding untuk batch ${b + 1}/${batches.length} (isi: ${batch.length} chunk, percobaan ${attempt}/${retries})...`);
+        const response = await ai.models.embedContent({
+          model: "gemini-embedding-2-preview",
+          contents: batch,
+        });
+        
+        if (response && response.embeddings && response.embeddings.length > 0) {
+          batchEmbeddings = response.embeddings.map(e => e.values || null);
+          break; // Success! Break retry loop
+        }
+        throw new Error("Invalid response format from Gemini embedding model (batch).");
+      } catch (err: any) {
+        const isRateLimit = err.message?.includes("429") || err.status === 429 || err.message?.includes("quota") || err.message?.includes("RESOURCE_EXHAUSTED");
+        if (isRateLimit && attempt < retries) {
+          const backoff = delay * Math.pow(2, attempt) + Math.random() * 500;
+          console.warn(`[Batch ${b + 1}] Gemini Embedding Rate Limit (429) hit. Mencoba kembali dalam ${Math.round(backoff)}ms...`);
+          await sleep(backoff);
+        } else if (attempt === retries) {
+          console.error(`[Batch ${b + 1}] Gagal memproses embedding setelah ${retries} percobaan:`, err.message);
+          throw err;
+        } else {
+          // For non-rate-limit errors, still retry after a short delay
+          await sleep(500);
         }
       }
-    });
-    const response = await ai.models.embedContent({
-      model: "gemini-embedding-2-preview",
-      contents: text,
-    });
-    if (response && response.embeddings && response.embeddings[0] && response.embeddings[0].values) {
-      return response.embeddings[0].values;
     }
-    throw new Error("Invalid response format from Gemini embedding model.");
-  } catch (err: any) {
-    console.error("Embedding generation failed:", err.message);
-    throw err;
+    
+    if (batchEmbeddings) {
+      allEmbeddings.push(...batchEmbeddings);
+    } else {
+      // If a batch completely fails, we fill with nulls so we don't break indexing order
+      console.warn(`[Batch ${b + 1}] Batch embedding gagal total. Mengisi ${batch.length} baris dengan null embedding.`);
+      allEmbeddings.push(...new Array(batch.length).fill(null));
+    }
   }
+  
+  return allEmbeddings;
 }
 
 // HELPER: Similarity search on Supabase dokumen_vektor with graceful local fallback
@@ -391,34 +729,47 @@ async function searchSimilarChunks(
   prodiId: string | null,
   limit: number = 5
 ): Promise<any[]> {
+  const filterUuid = prodiId ? toUUID(prodiId) : null;
+  
   try {
-    const queryEmbedding = await getEmbedding(queryText);
-    const filterUuid = prodiId ? toUUID(prodiId) : null;
-
-    // Call Supabase matching function RPC
-    const { data, error } = await supabase.rpc("match_document_chunks", {
-      query_embedding: queryEmbedding,
-      match_threshold: -1.0, // Accept any similarity so we don't return 0 results if they are weakly related
-      match_count: limit,
-      filter_prodi_id: filterUuid
-    });
-
-    if (!error && data && data.length > 0) {
-      console.log(`RAG: Found ${data.length} relevant chunks from pgvector search.`);
-      return data;
+    // 1. Try Vector Search first
+    let queryEmbedding: number[] | null = null;
+    try {
+      queryEmbedding = await getEmbedding(queryText);
+    } catch (embedErr: any) {
+      console.warn("RAG: Gagal membuat embedding untuk pencarian, menggunakan pencarian kata kunci fallback:", embedErr.message);
     }
 
-    if (error) {
-      console.warn("RPC match_document_chunks failed or not set up:", error.message);
-    }
+    if (queryEmbedding) {
+      // Call Supabase matching function RPC
+      const { data, error } = await supabase.rpc("match_document_chunks", {
+        query_embedding: queryEmbedding,
+        match_threshold: -1.0, // Accept any similarity so we don't return 0 results if they are weakly related
+        match_count: limit,
+        filter_prodi_id: filterUuid
+      });
 
-    // Graceful fallback: If pgvector / RPC is not ready, do a standard table filter search
-    console.log("RAG Fallback: querying dokumen_vektor table using select list...");
+      if (!error && data && data.length > 0) {
+        console.log(`RAG: Found ${data.length} relevant chunks from pgvector search.`);
+        return data;
+      }
+
+      if (error) {
+        console.warn("RPC match_document_chunks failed or not set up:", error.message);
+      }
+    }
+  } catch (err: any) {
+    console.error("Vector similarity search failed:", err.message);
+  }
+
+  // 2. Keyword fallback: If pgvector search failed, wasn't ready, or embedding failed
+  try {
+    console.log("RAG Fallback: querying dokumen_vektor table using keyword search...");
     const tableQuery = supabase.from("dokumen_vektor").select("id, nama_file, konten_teks, prodi_id");
     if (filterUuid) {
       tableQuery.eq("prodi_id", filterUuid);
     }
-    const { data: fallbackData, error: tableError } = await tableQuery.limit(50);
+    const { data: fallbackData, error: tableError } = await tableQuery.limit(100);
     if (!tableError && fallbackData && fallbackData.length > 0) {
       // Find subset of chunks containing keywords for very basic keyword matching
       const words = queryText.toLowerCase().split(/\s+/).filter(w => w.length > 2);
@@ -439,7 +790,7 @@ async function searchSimilarChunks(
       }));
     }
   } catch (err: any) {
-    console.error("Similarity search failed:", err.message);
+    console.error("Keyword search fallback failed:", err.message);
   }
   return [];
 }
@@ -479,8 +830,14 @@ app.post(["/api/referensi-dokumen/upload", "/api/upload", "/api/prodi/upload"], 
         }
       } else if (fileExtension === ".pdf") {
         try {
-          const pdfParser = new PDFParse(new Uint8Array(file.buffer));
-          extractedText = await pdfParser.getText();
+          extractedText = await runWithSuppressedPdfWarnings(async () => {
+            const pdfParser = new PDFParse({
+              data: new Uint8Array(file.buffer),
+              standardFontDataUrl: "https://unpkg.com/pdfjs-dist@2.14.305/standard_fonts/",
+              disableFontFace: true
+            });
+            return await pdfParser.getText();
+          });
         } catch (pdfErr: any) {
           console.error("Gagal mengurai .pdf dengan pdf-parse:", pdfErr);
           throw new Error(`Gagal membaca file PDF ${file.originalname}: ${pdfErr.message}`);
@@ -507,27 +864,33 @@ app.post(["/api/referensi-dokumen/upload", "/api/upload", "/api/prodi/upload"], 
         
         const targetProdiUuid = prodi_id ? toUUID(prodi_id) : null;
         
-        for (let i = 0; i < textChunks.length; i++) {
-          const chunkText = textChunks[i];
-          try {
-            const embeddingVector = await getEmbedding(chunkText);
-            const { error: chunkError } = await supabase
-              .from("dokumen_vektor")
-              .insert({
-                prodi_id: targetProdiUuid,
-                nama_file: file.originalname || "rujukan.txt",
-                konten_teks: chunkText,
-                embedding: embeddingVector
-              });
-            
-            if (chunkError) {
-              console.warn(`RAG Warning: Gagal menyimpan chunk ${i + 1} ke database:`, chunkError.message);
-            }
-          } catch (embedErr: any) {
-            console.error(`RAG Warning: Gagal membuat/menyimpan embedding chunk ${i + 1}:`, embedErr.message);
-          }
+        let embeddings: (number[] | null)[] = [];
+        try {
+          // Generate all embeddings in robust batches with automatic retries and rate-limiting delays
+          embeddings = await getEmbeddingsBatchWithRetry(textChunks);
+        } catch (batchErr: any) {
+          console.error("RAG Warning: Gagal menghasilkan embedding untuk dokumen secara batch, memproses penyimpanan chunk tanpa embedding:", batchErr.message);
+          embeddings = new Array(textChunks.length).fill(null);
         }
-        console.log(`RAG: Berhasil memproses ${textChunks.length} chunks untuk file "${file.originalname}".`);
+
+        // Batch insert to Supabase for extreme speedup and network efficiency
+        const insertRows = textChunks.map((chunkText, idx) => ({
+          prodi_id: targetProdiUuid,
+          nama_file: file.originalname || "rujukan.txt",
+          konten_teks: chunkText,
+          embedding: embeddings[idx]
+        }));
+
+        console.log(`RAG: Menyimpan ${insertRows.length} chunk ke database secara batch...`);
+        const { error: chunkError } = await supabase
+          .from("dokumen_vektor")
+          .insert(insertRows);
+        
+        if (chunkError) {
+          console.error("RAG Error: Gagal menyimpan batch chunks ke database:", chunkError.message);
+        } else {
+          console.log(`RAG: Berhasil memproses & menyimpan ${textChunks.length} chunks untuk file "${file.originalname}".`);
+        }
       } catch (ragErr: any) {
         console.error("RAG Error: Gagal memproses chunking/embeddings:", ragErr.message);
       }
@@ -779,8 +1142,8 @@ app.post("/api/gemini/generate", upload.array("files"), async (req, res) => {
     const isInteractive = generationMode === "interactive";
 
     const systemInstruction = isInteractive
-      ? "Anda adalah Auditor Utama & Konsultan Akreditasi Senior Perguruan Tinggi di Indonesia (spesialis BAN-PT dan Lembaga Akreditasi Mandiri). Tugas Anda adalah menganalisis dokumen akreditasi yang diminta dan memformulasikan daftar pertanyaan wawancara terarah, instruksi pengumpulan data, serta checklist dokumen bukti yang wajib dipersiapkan sebelum draf dokumen dibuat. Gunakan Bahasa Indonesia formal, bersahabat, sangat terstruktur, dan mendalam. PENTING: Gunakan tabel Markdown GFM (| dan -) untuk menyajikan kerangka kerja, daftar indikator, atau matriks agar mudah dibaca."
-      : "Anda adalah Asisten Ahli Akreditasi Perguruan Tinggi di Indonesia (spesialis BAN-PT dan Lembaga Akreditasi Mandiri seperti LAMDIK, LAM INFOKOM, dll). Tugas Anda adalah membuat draf dokumen akreditasi yang sangat rapi, mendalam, akademis, dan terstruktur sesuai dengan standar resmi LAM dan BAN-PT. Gunakan Bahasa Indonesia formal, baku, dan analitis. PENTING: Untuk semua bagian data terstruktur (seperti profil dosen, matriks penilaian, sebaran mahasiswa, target IKU, profil program studi, kurikulum, dan data penunjang kuantitatif lainnya), Anda WAJIB menyajikannya dalam format Tabel Markdown GFM yang sempurna menggunakan garis vertikal | dan baris pembagi strip -. Jangan membuat tabel dengan karakter lain atau list teks biasa.";
+      ? "Anda adalah Auditor Utama & Konsultan Akreditasi Senior Perguruan Tinggi di Indonesia (spesialis BAN-PT dan Lembaga Akreditasi Mandiri). Tugas Anda adalah menganalisis dokumen akreditasi yang diminta dan memformulasikan daftar pertanyaan wawancara terarah, instruksi pengumpulan data, serta checklist dokumen bukti yang wajib dipersiapkan sebelum draf dokumen dibuat. Tulis analisis Anda secara sangat detail, komprehensif, mendalam, dan menyeluruh. Hindari ringkasan singkat atau poin outline saja. Tulis bab demi bab secara lengkap dengan data penjelas yang kaya. Gunakan Bahasa Indonesia akademis formal, bersahabat, sangat terstruktur, dan mendalam. PENTING: Gunakan tabel Markdown GFM (| dan -) untuk menyajikan kerangka kerja, daftar indikator, atau matriks agar mudah dibaca."
+      : "Anda adalah Asisten Ahli Akreditasi Perguruan Tinggi di Indonesia (spesialis BAN-PT dan Lembaga Akreditasi Mandiri seperti LAMDIK, LAM INFOKOM, dll). Tugas Anda adalah membuat draf dokumen akreditasi yang sangat rapi, mendalam, akademis, dan terstruktur sesuai dengan standar resmi LAM dan BAN-PT. PENTING: Tulis dokumen dengan SANGAT LENGKAP DAN PANJANG, JANGAN HANYA MEMBERIKAN OUTLINE, DAFTAR POIN SINGKAT, ATAU TEMPLATE KOSONG. Anda harus menuliskan paragraf narasi evaluasi diri yang utuh, komprehensif, akademis, analitis, dan mendetail untuk setiap subbab. Jika ada data kuantitatif yang dirujuk, isi dengan angka-angka simulasi yang realistis, nama-nama dosen lengkap, serta publikasi rill untuk bidang studi tersebut. Gunakan Bahasa Indonesia formal, baku, dan analitis. Untuk semua bagian data terstruktur (seperti profil dosen, matriks penilaian, sebaran mahasiswa, target IKU, profil program studi, kurikulum, dan data penunjang kuantitatif lainnya), Anda WAJIB menyajikannya dalam format Tabel Markdown GFM yang sempurna menggunakan garis vertikal | dan baris pembagi strip -. Jangan membuat tabel dengan karakter lain atau list teks biasa.";
 
     // 1. Process files uploaded directly via generator (if any)
     let uploadedFilesContext = "";
@@ -800,8 +1163,14 @@ app.post("/api/gemini/generate", upload.array("files"), async (req, res) => {
           }
         } else if (fileExtension === ".pdf") {
           try {
-            const pdfParser = new PDFParse(new Uint8Array(file.buffer));
-            fileText = await pdfParser.getText();
+            fileText = await runWithSuppressedPdfWarnings(async () => {
+              const pdfParser = new PDFParse({
+                data: new Uint8Array(file.buffer),
+                standardFontDataUrl: "https://unpkg.com/pdfjs-dist@2.14.305/standard_fonts/",
+                disableFontFace: true
+              });
+              return await pdfParser.getText();
+            });
           } catch (err: any) {
             console.error(`Gagal ekstrak .pdf ${file.originalname}:`, err);
           }
@@ -1001,14 +1370,45 @@ Oleh karena itu, gunakan pengetahuan internal bawaan Anda mengenai standar akred
 Buatlah narasi yang logis, lengkap, profesional, dan realistis untuk membantu program studi ${prodiInfo.name} mencapai hasil akreditasi terbaik.`;
     }
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: prompt,
-      config: {
-        systemInstruction: systemInstruction,
-        temperature: 0.7,
+    // 5. Generate content with robust retries for temporary Gemini 503 Service Unavailable or 429 Rate Limits
+    let response;
+    let genRetries = 3;
+    let genDelay = 1000;
+    for (let attempt = 1; attempt <= genRetries; attempt++) {
+      try {
+        console.log(`AI: Meminta draf dokumen dari model gemini-3.5-flash (percobaan ${attempt}/${genRetries})...`);
+        response = await ai.models.generateContent({
+          model: "gemini-3.5-flash",
+          contents: prompt,
+          config: {
+            systemInstruction: systemInstruction,
+            temperature: 0.7,
+          }
+        });
+        if (response && response.text) {
+          break; // Success!
+        }
+        throw new Error("Respons dari model kosong atau tidak valid.");
+      } catch (err: any) {
+        const isRetryable = err.status === 503 || err.status === 429 || 
+                            err.message?.includes("503") || err.message?.includes("429") || 
+                            err.message?.includes("UNAVAILABLE") || err.message?.includes("RESOURCE_EXHAUSTED") ||
+                            err.message?.includes("quota") || err.message?.includes("demand");
+        
+        if (isRetryable && attempt < genRetries) {
+          const backoff = genDelay * Math.pow(2, attempt) + Math.random() * 500;
+          console.warn(`AI Generation hit service limit/unavailability (attempt ${attempt}/${genRetries}). Mencoba kembali dalam ${Math.round(backoff)}ms...`);
+          await sleep(backoff);
+        } else {
+          console.error(`AI Generation gagal pada percobaan ${attempt}/${genRetries}:`, err.message);
+          throw err;
+        }
       }
-    });
+    }
+
+    if (!response) {
+      throw new Error("Gagal memperoleh draf dokumen dari AI setelah beberapa percobaan karena layanan sedang sibuk (503). Silakan coba lagi sebentar lagi.");
+    }
 
     const textOutput = response.text || "";
     const cleanDate = new Date().toISOString().slice(2, 10).replace(/-/g, "");
@@ -1050,6 +1450,83 @@ Buatlah narasi yang logis, lengkap, profesional, dan realistis untuk membantu pr
           console.error("Gagal menyimpan hasil generator ke database hasil_dokumen_generator:", saveError.message);
         } else {
           console.log("Berhasil menyimpan draf hasil_dokumen_generator dengan ID:", savedDoc?.id);
+        }
+
+        // Auto-upsert into berkas_akreditasi per user's requirement
+        let jenisDok = String(documentType).toUpperCase();
+        if (jenisDok === 'LEGALITAS') {
+          jenisDok = 'IZIN';
+        }
+
+        if (jenisDok === 'LED' || jenisDok === 'LKPS' || jenisDok === 'IZIN') {
+          try {
+            let isTableMissing = forceLocalBerkasFallback;
+            let existingBerkasId: any = null;
+
+            if (!isTableMissing) {
+              const { data: existingBerkas, error: checkError } = await supabase
+                .from('berkas_akreditasi')
+                .select('id')
+                .eq('prodi_id', pUuid)
+                .eq('jenis_dokumen', jenisDok)
+                .maybeSingle();
+
+              if (checkError) {
+                console.warn("Check berkas_akreditasi existing inside AI generator error:", checkError.message);
+                if (checkError.message?.includes("Could not find the table") || checkError.message?.includes("does not exist") || checkError.message?.includes("cache")) {
+                  forceLocalBerkasFallback = true;
+                  isTableMissing = true;
+                }
+              } else if (existingBerkas) {
+                existingBerkasId = existingBerkas.id;
+              }
+            }
+
+            const berkasPayload = {
+              prodi_id: pUuid,
+              jenis_dokumen: jenisDok,
+              status_berkas: 'Draf',
+              nama_file: fileName,
+              file_url: null,
+              konten_markdown: textOutput,
+              updated_at: new Date().toISOString()
+            };
+
+            if (!isTableMissing) {
+              if (existingBerkasId) {
+                await supabase
+                  .from('berkas_akreditasi')
+                  .update(berkasPayload)
+                  .eq('id', existingBerkasId);
+              } else {
+                await supabase
+                  .from('berkas_akreditasi')
+                  .insert(berkasPayload);
+              }
+              console.log(`Berhasil melakukan auto-upsert berkas_akreditasi [Draf] untuk prodi ${pUuid} jenis ${jenisDok}`);
+            } else {
+              console.log(`Saving berkas_akreditasi [Draf] to local fallback (AI Generator)`);
+              const localData = readLocalBerkas();
+              const existingIdx = localData.findIndex(
+                (b: any) => toUUID(b.prodi_id) === pUuid && String(b.jenis_dokumen).toUpperCase() === jenisDok
+              );
+
+              const payloadWithId = {
+                id: existingIdx !== -1 ? localData[existingIdx].id : `berkas-${pUuid}-${jenisDok}`,
+                ...berkasPayload
+              };
+
+              if (existingIdx !== -1) {
+                localData[existingIdx] = payloadWithId;
+              } else {
+                localData.push(payloadWithId);
+              }
+
+              writeLocalBerkas(localData);
+            }
+          } catch (berkasErr: any) {
+            console.error("Gagal melakukan auto-upsert berkas_akreditasi:", berkasErr.message);
+          }
         }
       } catch (dbErr: any) {
         console.error("Kesalahan menyimpan dokumen ke Supabase:", dbErr.message);
