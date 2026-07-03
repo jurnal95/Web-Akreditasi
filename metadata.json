@@ -1,0 +1,8 @@
+{
+  "name": "Remix: Monitoring Akreditasi Kampus",
+  "description": "Sistem Informasi Monitoring dan Publikasi Akreditasi Program Studi di Kampus",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
